@@ -74,12 +74,19 @@ def main() -> int:
                    help="Compute Deflated Sharpe and (with --sensitivity) PBO")
     p.add_argument("--pbo-blocks", type=int, default=16,
                    help="Number of CSCV blocks for PBO (must be even, default 16)")
+    p.add_argument("--start-date", help="YYYY-MM-DD; overrides backtest.start_date in config")
+    p.add_argument("--end-date", help="YYYY-MM-DD; overrides backtest.end_date in config")
     p.add_argument("--out", default="logs/backtest_results")
     args = p.parse_args()
 
     cfg = load_config(args.config)
     setup_logging(cfg.get("logging", {}).get("level", "INFO"),
                   cfg.get("logging", {}).get("file"))
+
+    if args.start_date:
+        cfg["backtest"]["start_date"] = args.start_date
+    if args.end_date:
+        cfg["backtest"]["end_date"] = args.end_date
 
     # Resolve data files
     ltf_path = args.data_ltf or args.data
@@ -105,9 +112,12 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
     starting_equity = cfg["backtest"]["initial_equity"]
 
-    # In-sample backtest
+    # In-sample backtest. CLI date overrides clip the window passed to the engine.
     bt = Backtester(cfg)
-    trades, equity = bt.run(ltf, htf, args.symbol, args.asset_class, args.timeframe_low)
+    trades, equity = bt.run(
+        ltf, htf, args.symbol, args.asset_class, args.timeframe_low,
+        start_date=args.start_date, end_date=args.end_date,
+    )
 
     metrics = compute_metrics(trades, starting_equity)
     print("\n=== In-sample backtest ===")

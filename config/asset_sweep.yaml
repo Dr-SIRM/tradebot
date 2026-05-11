@@ -1,0 +1,90 @@
+# Asset sweep spec: which markets to test the default strategies on.
+#
+# Picked to cover four different market regimes:
+#   - crypto majors (BTC, ETH) on daily (less noisy than 1h)
+#   - US equity index (SPY, QQQ) on daily (clean long trends)
+#   - forex majors (EURUSD, GBPUSD) on 1h (often trend-friendly)
+#   - commodities (GC=F gold, CL=F oil) on daily
+#
+# To populate these CSVs, run on a machine with internet access:
+#
+#   mkdir -p data/raw
+#   # Crypto via CCXT/Binance (or pass --exchange kraken if geo-blocked)
+#   python -m data.download crypto BTC/USDT 1d 2017-01-01 2026-05-11 -o data/raw/btc_1d.csv
+#   python -m data.download crypto ETH/USDT 1d 2017-08-01 2026-05-11 -o data/raw/eth_1d.csv
+#   # Equities & ETFs via yfinance (daily can go back decades)
+#   python -m data.download equity SPY 1d 2010-01-01 2026-05-11 -o data/raw/spy_1d.csv
+#   python -m data.download equity QQQ 1d 2010-01-01 2026-05-11 -o data/raw/qqq_1d.csv
+#   # Forex via yfinance (note PAIR=X format, 1h limited to ~730 day lookback)
+#   python -m data.download equity "EURUSD=X" 1h 2024-05-15 2026-05-11 -o data/raw/eurusd_1h.csv
+#   python -m data.download equity "GBPUSD=X" 1h 2024-05-15 2026-05-11 -o data/raw/gbpusd_1h.csv
+#   # Commodities (continuous futures via yfinance)
+#   python -m data.download equity "GC=F" 1d 2010-01-01 2026-05-11 -o data/raw/gold_1d.csv
+#   python -m data.download equity "CL=F" 1d 2010-01-01 2026-05-11 -o data/raw/oil_1d.csv
+#
+# Then run:
+#   python run_asset_sweep.py --spec config/asset_sweep.yaml --sensitivity --out logs/sweep
+
+start_date: '2018-01-01'    # Use the longest window each CSV supports; sweep clips per file
+end_date: '2026-05-11'
+
+# Run the sensitivity grid for each asset so PBO is meaningful.
+# Without this DSR is reported with n_trials=1 (no deflation).
+sensitivity: true
+
+# Smaller blocks → fewer CSCV splits but works on shorter histories.
+# 8 blocks → C(8,4) = 70 splits, fine for daily series >= ~200 bars.
+pbo_blocks: 8
+
+assets:
+  # Crypto on daily — much cleaner than 1h
+  - data: data/raw/btc_1d.csv
+    symbol: BTC/USDT
+    asset_class: crypto
+    tf_low: 1d
+    tf_high: 1d
+
+  - data: data/raw/eth_1d.csv
+    symbol: ETH/USDT
+    asset_class: crypto
+    tf_low: 1d
+    tf_high: 1d
+
+  # Equities — daily, long history, often have persistent trends
+  - data: data/raw/spy_1d.csv
+    symbol: SPY
+    asset_class: equity
+    tf_low: 1d
+    tf_high: 1d
+
+  - data: data/raw/qqq_1d.csv
+    symbol: QQQ
+    asset_class: equity
+    tf_low: 1d
+    tf_high: 1d
+
+  # Forex on 1h — yfinance caps 1h at ~730 days lookback, so window will be auto-clipped
+  - data: data/raw/eurusd_1h.csv
+    symbol: EUR/USD
+    asset_class: forex
+    tf_low: 1h
+    tf_high: 4h
+
+  - data: data/raw/gbpusd_1h.csv
+    symbol: GBP/USD
+    asset_class: forex
+    tf_low: 1h
+    tf_high: 4h
+
+  # Commodities — daily; gold often trend-friendly, oil more volatile
+  - data: data/raw/gold_1d.csv
+    symbol: XAU/USD
+    asset_class: commodity
+    tf_low: 1d
+    tf_high: 1d
+
+  - data: data/raw/oil_1d.csv
+    symbol: CL/USD
+    asset_class: commodity
+    tf_low: 1d
+    tf_high: 1d
