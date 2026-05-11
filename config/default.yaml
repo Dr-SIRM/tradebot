@@ -1,0 +1,177 @@
+# Multi-asset trading bot — default configuration
+# All numeric parameters are tunable here. Do not hardcode values in code.
+
+mode: paper                 # paper | live | backtest
+
+account:
+  starting_equity: 100000   # USD; for paper/backtest. Live mode reads from broker.
+  base_currency: USD
+
+universe:
+  # Each symbol gets independent strategy evaluation.
+  # asset_class is used by the correlation/exposure caps.
+  - symbol: BTC/USDT
+    broker: binance
+    asset_class: crypto
+    timeframe_high: 1h
+    timeframe_low: 5m
+  - symbol: ETH/USDT
+    broker: binance
+    asset_class: crypto
+    timeframe_high: 1h
+    timeframe_low: 5m
+  - symbol: SPY
+    broker: alpaca
+    asset_class: equity
+    timeframe_high: 1h
+    timeframe_low: 5m
+  - symbol: QQQ
+    broker: alpaca
+    asset_class: equity
+    timeframe_high: 1h
+    timeframe_low: 5m
+  - symbol: EUR_USD
+    broker: oanda
+    asset_class: forex
+    timeframe_high: 1h
+    timeframe_low: 15m
+  - symbol: XAU_USD
+    broker: oanda
+    asset_class: commodity
+    timeframe_high: 4h
+    timeframe_low: 15m
+
+risk:
+  max_risk_per_trade_pct: 0.01     # 1% of equity at risk per trade
+  min_reward_risk_ratio: 2.5
+  atr_stop_mult_min: 1.5
+  atr_stop_mult_max: 2.0
+  daily_drawdown_halt_pct: 0.04    # pause trading for the day
+  weekly_drawdown_halt_pct: 0.08   # halt and alert
+  max_concurrent_positions: 3
+  trailing_stop_atr_mult: 1.0      # tighten when in profit
+  trailing_activate_R: 1.5         # activate trailing once trade is +1.5R
+  conviction_scale_min: 0.5        # minimum size multiplier
+  conviction_scale_max: 1.0        # maximum size multiplier
+  news_blackout_minutes: 15        # ± minutes around high-impact news
+
+correlation:
+  # Symbols inside a cluster count as one exposure.
+  clusters:
+    - [BTC/USDT, ETH/USDT, SOL/USDT]   # crypto majors
+    - [SPY, QQQ, IWM]                   # US equity index
+    - [EUR_USD, GBP_USD]                # EUR/GBP-correlated FX
+  asset_class_caps:
+    crypto: 2          # max simultaneous open positions per class
+    equity: 2
+    forex: 2
+    commodity: 1
+
+strategy:
+  # Which strategies are eligible. The selector chooses one per bar based on regime.
+  enabled: [momentum, mean_reversion, breakout]
+
+  momentum:
+    ema_fast: 9
+    ema_slow: 21
+    rsi_period: 14
+    rsi_min_long: 50
+    rsi_max_short: 50
+    volume_surge_mult: 1.5  # vol > 1.5× SMA(vol, 20)
+    htf_ema_period: 50      # higher-timeframe trend filter
+
+  mean_reversion:
+    bb_period: 20
+    bb_std: 2.0
+    rsi_period: 14
+    rsi_oversold: 25
+    rsi_overbought: 75
+    bb_squeeze_pct: 0.02    # band width < 2% of mid → squeeze
+    require_squeeze: false  # if true, only fade after squeeze
+
+  breakout:
+    lookback_bars: 20
+    volume_confirm_mult: 1.5
+    consolidation_atr_pct: 0.5  # ATR/price < 0.5% → consolidation
+
+  regime:
+    adx_period: 14
+    adx_trending: 25         # ADX > 25 → trending
+    adx_ranging: 20          # ADX < 20 → ranging
+    atr_period: 14
+    atr_high_vol_pct: 2.0    # ATR/price > 2% → high vol
+
+ml:
+  enabled: false             # set true to enable XGBoost scoring
+  model_path: ml/model.pkl
+  min_score_to_trade: 0.55   # 0–1 probability threshold
+  feature_lookback: 50       # bars used to build features
+
+execution:
+  prefer_limit: true
+  limit_offset_bps: 2        # place limit at mid ± 2 bps
+  limit_timeout_seconds: 30  # if not filled, cancel + market (for momentum)
+  market_fallback_strategies: [momentum, breakout]  # mean-reversion always limit
+  slippage_bps_assumed: 5    # for backtest fill modeling
+
+data:
+  warmup_bars: 200           # need at least this many bars before signaling
+  reconnect_seconds: 5
+  rate_limit_buffer_pct: 0.8 # never exceed 80% of broker's rate limit
+
+calendar:
+  provider: manual           # 'manual' uses static file; production: forexfactory/etc.
+  manual_events_file: config/economic_events.yaml
+
+alerts:
+  enabled: true
+  channels: [console]        # console | telegram | discord
+  telegram:
+    bot_token: ${TELEGRAM_BOT_TOKEN}
+    chat_id: ${TELEGRAM_CHAT_ID}
+  discord:
+    webhook_url: ${DISCORD_WEBHOOK_URL}
+  daily_summary_utc_hour: 22
+
+dashboard:
+  refresh_seconds: 2
+
+logging:
+  level: INFO
+  file: logs/tradebot.log
+  rotate_mb: 50
+  trade_log_csv: logs/trades.csv
+
+brokers:
+  paper:
+    fee_bps: 5             # 5 bps round-trip fee assumption
+    slippage_bps: 3
+  binance:
+    api_key: ${BINANCE_API_KEY}
+    api_secret: ${BINANCE_API_SECRET}
+    testnet: true
+  alpaca:
+    api_key: ${ALPACA_API_KEY}
+    api_secret: ${ALPACA_API_SECRET}
+    paper: true
+  oanda:
+    api_key: ${OANDA_API_KEY}
+    account_id: ${OANDA_ACCOUNT_ID}
+    practice: true
+
+backtest:
+  start_date: '2023-01-01'
+  end_date: '2024-12-31'
+  initial_equity: 100000
+  walkforward:
+    train_months: 6
+    test_months: 2
+    windows: 4
+  montecarlo:
+    runs: 1000
+    block_size: 1            # bootstrap block size in trades
+  sensitivity:
+    grid:
+      ema_fast: [7, 9, 12]
+      ema_slow: [18, 21, 26]
+      rsi_period: [10, 14, 21]

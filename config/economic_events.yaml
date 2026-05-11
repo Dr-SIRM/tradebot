@@ -1,0 +1,15 @@
+# Manual economic events — replace with API-backed source for production.
+# Only 'high' impact events trigger blackout windows.
+events:
+  - time: '2026-05-14T18:00:00Z'
+    currency: USD
+    impact: high
+    name: FOMC Minutes
+  - time: '2026-05-15T12:30:00Z'
+    currency: USD
+    impact: high
+    name: CPI
+  - time: '2026-05-22T12:30:00Z'
+    currency: USD
+    impact: high
+    name: NFP
