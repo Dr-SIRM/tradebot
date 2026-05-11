@@ -1,0 +1,34 @@
+# Remaining assets to evaluate (BTC already done — its row is in
+# logs/sweep_real/sweep.csv). Kept lighter (no sensitivity for the long-bar
+# assets) so this fits inside the Monitor budget.
+start_date: '2022-01-01'
+end_date: '2026-05-11'
+sensitivity: true
+pbo_blocks: 8
+
+assets:
+  - data: data/raw/eth_1h.csv
+    symbol: ETH/USDT
+    asset_class: crypto
+    tf_low: 1h
+    tf_high: 4h
+  - data: data/raw/eurusd_1h.csv
+    symbol: EUR/USD
+    asset_class: forex
+    tf_low: 1h
+    tf_high: 4h
+  - data: data/raw/spy_1h.csv
+    symbol: SPY
+    asset_class: equity
+    tf_low: 1h
+    tf_high: 4h
+  - data: data/raw/qqq_1d.csv
+    symbol: QQQ
+    asset_class: equity
+    tf_low: 1d
+    tf_high: 1d
+  - data: data/raw/gold_1d.csv
+    symbol: XAU/USD
+    asset_class: commodity
+    tf_low: 1d
+    tf_high: 1d
