@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 class SensitivityResult:
     grid_keys: List[str]
     rows: List[Dict[str, Any]] = field(default_factory=list)
+    # Per-config equity curves, kept for downstream robustness analysis (PBO).
+    equity_curves: List[pd.Series] = field(default_factory=list)
 
     def to_dataframe(self) -> pd.DataFrame:
         return pd.DataFrame(self.rows)
@@ -105,7 +107,7 @@ def run_sensitivity(
 
         try:
             bt = Backtester(cfg)
-            trades, _equity = bt.run(ltf, htf, symbol, asset_class, timeframe_low)
+            trades, equity = bt.run(ltf, htf, symbol, asset_class, timeframe_low)
             metrics = compute_metrics(trades, starting_equity)
             row: Dict[str, Any] = {**combo}
             row.update({
@@ -120,9 +122,11 @@ def run_sensitivity(
                 "final_equity": metrics.get("final_equity", starting_equity),
             })
             result.rows.append(row)
+            result.equity_curves.append(equity)
         except Exception as e:
             logger.exception("Sensitivity run %d/%d failed: %s", i + 1, len(combos), e)
             result.rows.append({**combo, "error": str(e)})
+            result.equity_curves.append(pd.Series(dtype=float))
 
         if (i + 1) % 5 == 0 or (i + 1) == len(combos):
             logger.info("  progress %d/%d", i + 1, len(combos))

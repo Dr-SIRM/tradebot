@@ -28,6 +28,11 @@ import pandas as pd
 from backtest.engine import Backtester
 from backtest.metrics import compute_metrics, summary_str
 from backtest.montecarlo import run_monte_carlo
+from backtest.robustness import (
+    deflated_sharpe_ratio,
+    probability_of_backtest_overfitting,
+    returns_matrix_from_sensitivity,
+)
 from backtest.sensitivity import run_sensitivity
 from backtest.walkforward import run_walkforward, aggregate
 from data.feed import load_historical
@@ -65,6 +70,10 @@ def main() -> int:
     p.add_argument("--monte-carlo", action="store_true")
     p.add_argument("--mc-runs", type=int, default=1000)
     p.add_argument("--sensitivity", action="store_true")
+    p.add_argument("--robustness", action="store_true",
+                   help="Compute Deflated Sharpe and (with --sensitivity) PBO")
+    p.add_argument("--pbo-blocks", type=int, default=16,
+                   help="Number of CSCV blocks for PBO (must be even, default 16)")
     p.add_argument("--out", default="logs/backtest_results")
     args = p.parse_args()
 
@@ -141,6 +150,7 @@ def main() -> int:
             print(mc.summary())
 
     # Sensitivity
+    sens = None
     if args.sensitivity:
         print("\n=== Parameter sensitivity ===")
         grid = cfg.get("backtest", {}).get("sensitivity", {}).get("grid", {})
@@ -151,6 +161,53 @@ def main() -> int:
                                    args.asset_class, args.timeframe_low)
             print(sens.summary())
             sens.to_dataframe().to_csv(out / "sensitivity.csv", index=False)
+
+    # Robustness: Deflated Sharpe + Probability of Backtest Overfitting
+    if args.robustness:
+        print("\n=== Robustness (anti-overfitting) ===")
+        if len(equity) < 5:
+            print("(not enough equity points; need a longer backtest)")
+        else:
+            # Daily returns for the in-sample run
+            eq_daily = equity.resample("1D").last().ffill()
+            rets = eq_daily.pct_change().dropna()
+            # How many configs did we effectively try? If sensitivity ran, that's N.
+            # Otherwise we assume 1 (still useful: it just won't deflate much).
+            n_trials = len(sens.rows) if sens is not None and sens.rows else 1
+            dsr = deflated_sharpe_ratio(rets, n_trials=n_trials,
+                                         periods_per_year=252)
+            print(dsr.summary())
+            pd.DataFrame([{
+                "observed_sharpe": dsr.observed_sharpe,
+                "expected_max_sharpe": dsr.expected_max_sharpe,
+                "deflated_sharpe": dsr.deflated_sharpe,
+                "n_trials": dsr.n_trials,
+                "n_observations": dsr.n_observations,
+                "skew": dsr.skew,
+                "kurtosis_excess": dsr.kurtosis_excess,
+            }]).to_csv(out / "deflated_sharpe.csv", index=False)
+
+        if sens is not None and len(sens.equity_curves) >= 2:
+            print()
+            ret_mat = returns_matrix_from_sensitivity(
+                sens.rows, sens.equity_curves, resample="1D"
+            )
+            if ret_mat.shape[0] < args.pbo_blocks or ret_mat.shape[1] < 2:
+                print(f"(insufficient data for PBO: shape={ret_mat.shape}, "
+                      f"need >= {args.pbo_blocks} rows × 2 cols)")
+            else:
+                pbo = probability_of_backtest_overfitting(
+                    ret_mat, n_blocks=args.pbo_blocks
+                )
+                print(pbo.summary())
+                pd.DataFrame([{
+                    "pbo": pbo.pbo,
+                    "n_strategies": pbo.n_strategies,
+                    "n_blocks": pbo.n_blocks,
+                    "n_splits": pbo.n_splits,
+                }]).to_csv(out / "pbo.csv", index=False)
+        elif args.robustness:
+            print("(PBO requires --sensitivity with >= 2 configs)")
 
     return 0
 
