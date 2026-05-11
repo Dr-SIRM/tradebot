@@ -47,5 +47,4 @@ htmlcov/
 *.pkl
 *.joblib
 data/cache/
-data/raw/
 logs/
