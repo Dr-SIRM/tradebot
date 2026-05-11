@@ -1,0 +1,46 @@
+# Asset sweep for the data the user has already downloaded into data/raw/.
+# Window starts 2022-01-01 so crypto+QQQ get full history; assets with shorter
+# histories (eurusd, spy hourly) just use what they have.
+start_date: '2022-01-01'
+end_date: '2026-05-11'
+sensitivity: true
+pbo_blocks: 8
+
+assets:
+  # Crypto on 1h (already-tested — expected NO_EDGE; included for parity)
+  - data: data/raw/btc_1h.csv
+    symbol: BTC/USDT
+    asset_class: crypto
+    tf_low: 1h
+    tf_high: 4h
+  - data: data/raw/eth_1h.csv
+    symbol: ETH/USDT
+    asset_class: crypto
+    tf_low: 1h
+    tf_high: 4h
+
+  # Forex (yfinance 1h limited to ~730 days)
+  - data: data/raw/eurusd_1h.csv
+    symbol: EUR/USD
+    asset_class: forex
+    tf_low: 1h
+    tf_high: 4h
+
+  # Equities — SPY is hourly (limited window), QQQ is daily (long history)
+  - data: data/raw/spy_1h.csv
+    symbol: SPY
+    asset_class: equity
+    tf_low: 1h
+    tf_high: 4h
+  - data: data/raw/qqq_1d.csv
+    symbol: QQQ
+    asset_class: equity
+    tf_low: 1d
+    tf_high: 1d
+
+  # Commodity (gold) — daily, long history
+  - data: data/raw/gold_1d.csv
+    symbol: XAU/USD
+    asset_class: commodity
+    tf_low: 1d
+    tf_high: 1d
