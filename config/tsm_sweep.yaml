@@ -1,0 +1,36 @@
+# Time-series momentum sweep on daily data.
+# Parameter choices follow Moskowitz/Ooi/Pedersen (2012):
+#   lookback_days: 252    # 12 months
+#   skip_days:     21     # 1 month — drops short-term reversal
+#   vol target:    10%    # annualized portfolio vol
+#   max leverage:  2x     # caps the inverse-vol scaling
+#   costs:         10 bps # per turnover unit (round-trip)
+#   rebalance:     monthly
+#
+# Window: 2018-01-01 to 2026-05-11 (each asset uses what it has).
+
+start_date: '2018-01-01'
+end_date: '2026-05-11'
+
+tsm:
+  lookback_days: 252
+  skip_days: 21
+  vol_lookback_days: 60
+  target_vol: 0.10
+  max_leverage: 2.0
+  cost_bps_per_turnover: 10.0
+  rebalance: monthly
+
+assets:
+  - data: data/raw/btc_1d.csv
+    symbol: BTC/USDT
+  - data: data/raw/eth_1d.csv
+    symbol: ETH/USDT
+  - data: data/raw/eurusd_1d.csv
+    symbol: EUR/USD
+  - data: data/raw/spy_1d.csv
+    symbol: SPY
+  - data: data/raw/qqq_1d.csv
+    symbol: QQQ
+  - data: data/raw/gold_1d.csv
+    symbol: XAU/USD
