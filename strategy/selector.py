@@ -48,7 +48,7 @@ class StrategySelector:
 
     def select(self, htf: pd.DataFrame, ltf: pd.DataFrame, symbol: str,
                asset_class: str, timeframe_low: str) -> tuple[Regime, Optional[Signal]]:
-        regime = self.regime.classify(ltf)
+        regime = self.regime.classify(ltf, asset_class)
         eligible = self.regime_map.get(regime, [])
         if not eligible:
             return regime, None

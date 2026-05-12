@@ -96,10 +96,26 @@ strategy:
 
   regime:
     adx_period: 14
-    adx_trending: 25         # ADX > 25 → trending
-    adx_ranging: 20          # ADX < 20 → ranging
+    adx_trending: 22         # ADX > 22 → trending (loosened from 25 — daily ADX
+                             # medians sit at 22-27; the old 25 left a wide
+                             # UNKNOWN zone in which no strategy can fire)
+    adx_ranging: 18          # ADX < 18 → ranging
     atr_period: 14
-    atr_high_vol_pct: 2.0    # ATR/price > 2% → high vol
+    atr_high_vol_pct: 3.0    # default; overridden per-class below.
+    # Per-asset-class volatility thresholds. Daily ATR/price varies *a lot*
+    # by asset class — using a single threshold makes crypto look "volatile"
+    # ~99% of the time while letting through equity bars unfairly. Numbers
+    # below are roughly the p90 of each class's typical daily ATR%, so the
+    # VOLATILE classification fires on the genuinely unusual 10% of bars.
+    asset_class_overrides:
+      crypto:
+        atr_high_vol_pct: 8.0    # BTC/ETH daily ATR runs 3-6% routinely
+      equity:
+        atr_high_vol_pct: 3.0    # SPY/QQQ daily ATR ~1-2% normal
+      forex:
+        atr_high_vol_pct: 1.5    # EURUSD daily ATR ~0.5-0.8% normal
+      commodity:
+        atr_high_vol_pct: 3.0    # Gold daily ATR ~1-2% normal
 
 ml:
   enabled: false             # set true to enable XGBoost scoring
@@ -164,8 +180,9 @@ backtest:
   end_date: '2024-12-31'
   initial_equity: 100000
   walkforward:
-    train_months: 6
-    test_months: 2
+    train_months: 12         # raised from 6: daily timeframes need longer
+                             # train windows (~250 daily bars vs ~125)
+    test_months: 3           # raised from 2 for the same reason
     windows: 4
   montecarlo:
     runs: 1000

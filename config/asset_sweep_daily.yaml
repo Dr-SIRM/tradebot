@@ -1,0 +1,45 @@
+# Asset sweep on daily timeframes — second run after retuning the regime
+# detector for daily volatility profiles (see commit "Daily-tuned regime").
+#
+# Goal: under the new asset-class-aware atr_high_vol_pct (crypto 8%, equity 3%,
+# forex 1.5%, commodity 3%) and looser ADX bands (22/18 instead of 25/20),
+# do any of the defaults show edge on daily bars?
+#
+# QQQ and gold already had real daily CSVs. The other four were resampled
+# from 1h via `python -c "...resample('1D')..."` (see commit notes).
+start_date: '2018-01-01'   # use longest available history per CSV
+end_date: '2026-05-11'
+sensitivity: true
+pbo_blocks: 8
+
+assets:
+  - data: data/raw/btc_1d.csv
+    symbol: BTC/USDT
+    asset_class: crypto
+    tf_low: 1d
+    tf_high: 1d
+  - data: data/raw/eth_1d.csv
+    symbol: ETH/USDT
+    asset_class: crypto
+    tf_low: 1d
+    tf_high: 1d
+  - data: data/raw/eurusd_1d.csv
+    symbol: EUR/USD
+    asset_class: forex
+    tf_low: 1d
+    tf_high: 1d
+  - data: data/raw/spy_1d.csv
+    symbol: SPY
+    asset_class: equity
+    tf_low: 1d
+    tf_high: 1d
+  - data: data/raw/qqq_1d.csv
+    symbol: QQQ
+    asset_class: equity
+    tf_low: 1d
+    tf_high: 1d
+  - data: data/raw/gold_1d.csv
+    symbol: XAU/USD
+    asset_class: commodity
+    tf_low: 1d
+    tf_high: 1d

@@ -96,3 +96,30 @@ class TestRegime:
         # With wide ATR, classification should not return TRENDING
         regime = det.classify(df)
         assert regime in (Regime.VOLATILE, Regime.RANGING, Regime.UNKNOWN)
+
+    def test_asset_class_override_applied(self):
+        # Same bars, but different per-class thresholds change the verdict.
+        # Volatile bars typically score ATR~3-5%. With base threshold 2.0
+        # they're VOLATILE; the 'crypto' override of 100% disables the
+        # volatile classification entirely so we fall through to ADX rules.
+        cfg = _full_cfg()
+        cfg["strategy"]["regime"]["atr_high_vol_pct"] = 2.0
+        cfg["strategy"]["regime"]["asset_class_overrides"] = {
+            "crypto": {"atr_high_vol_pct": 100.0},
+        }
+        df = add_all_indicators(_volatile_bars(), cfg)
+        det = RegimeDetector(cfg["strategy"]["regime"])
+        assert det.classify(df, asset_class="equity") == Regime.VOLATILE
+        assert det.classify(df, asset_class="crypto") != Regime.VOLATILE
+
+    def test_asset_class_override_falls_back_to_default(self):
+        cfg = _full_cfg()
+        cfg["strategy"]["regime"]["asset_class_overrides"] = {
+            "crypto": {"atr_high_vol_pct": 100.0},
+        }
+        df = add_all_indicators(_volatile_bars(), cfg)
+        det = RegimeDetector(cfg["strategy"]["regime"])
+        # No override for 'forex' → uses base 4.0 threshold from _full_cfg
+        regime_forex = det.classify(df, asset_class="forex")
+        regime_none = det.classify(df, asset_class=None)
+        assert regime_forex == regime_none
