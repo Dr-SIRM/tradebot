@@ -1,0 +1,106 @@
+# Futures contract specifications used by backtest/tsm_futures.py.
+#
+# Values are typical CME futures specs as of 2024-2026. Initial margins
+# move with volatility — these are conservative recent averages. Broker
+# day-trading margins can be substantially lower (sometimes 10-25% of
+# overnight) but we use overnight margins for TSM since positions are
+# held for ~30 days.
+#
+# Commission is per-side per-contract for retail electronic orders at
+# discount futures brokers (NinjaTrader/AMP/Tradovate ~$0.50-$1.50 + exchange).
+# Conservative estimate: $2.50 round-trip per micro, $5 round-trip per E-mini.
+#
+# Sources: CME contract specs, broker margin schedules. Values are
+# illustrative — verify with your broker before live trading.
+#
+# `proxy_price_scale` is the ratio: futures_price / proxy_csv_price. Use 1.0
+# when the proxy CSV already contains futures-level prices (e.g., yfinance
+# 'GC=F' returns gold futures). Use ~10 when the proxy is an ETF that trades
+# at 1/10 of the index/spot (SPY ≈ S&P/10), ~35-40 for QQQ ≈ Nasdaq-100/35.
+
+contracts:
+  # ----- Gold -----
+  GC:
+    name: Gold Futures
+    underlying: gold
+    multiplier: 100.0           # $/oz × 100 oz
+    tick_size: 0.10
+    tick_value: 10.0            # 0.10 × 100
+    initial_margin: 10000.0     # overnight margin
+    commission_per_side: 2.50
+    proxy_data: data/raw/gold_1d.csv
+    proxy_price_scale: 1.0      # data is already gold futures (GC=F)
+  MGC:                          # micro — 1/10 the size
+    name: Micro Gold Futures
+    underlying: gold
+    multiplier: 10.0
+    tick_size: 0.10
+    tick_value: 1.0
+    initial_margin: 1000.0
+    commission_per_side: 0.75
+    proxy_data: data/raw/gold_1d.csv
+    proxy_price_scale: 1.0      # data is already gold futures (GC=F)
+
+  # ----- Nasdaq-100 -----
+  NQ:
+    name: E-mini Nasdaq-100
+    underlying: nasdaq100
+    multiplier: 20.0            # $20 × index
+    tick_size: 0.25
+    tick_value: 5.0
+    initial_margin: 20000.0
+    commission_per_side: 2.50
+    proxy_data: data/raw/qqq_1d.csv
+    proxy_price_scale: 35.0     # QQQ ≈ Nasdaq-100 / 35 (drifts ~32-40 over time)
+  MNQ:                          # micro — 1/10
+    name: Micro E-mini Nasdaq-100
+    underlying: nasdaq100
+    multiplier: 2.0
+    tick_size: 0.25
+    tick_value: 0.50
+    initial_margin: 2000.0
+    commission_per_side: 0.75
+    proxy_data: data/raw/qqq_1d.csv
+    proxy_price_scale: 35.0
+
+  # ----- S&P 500 -----
+  ES:
+    name: E-mini S&P 500
+    underlying: sp500
+    multiplier: 50.0
+    tick_size: 0.25
+    tick_value: 12.50
+    initial_margin: 13000.0
+    commission_per_side: 2.50
+    proxy_data: data/raw/spy_1d.csv
+    proxy_price_scale: 10.0     # SPY ≈ S&P 500 / 10
+  MES:
+    name: Micro E-mini S&P 500
+    underlying: sp500
+    multiplier: 5.0
+    tick_size: 0.25
+    tick_value: 1.25
+    initial_margin: 1300.0
+    commission_per_side: 0.75
+    proxy_data: data/raw/spy_1d.csv
+    proxy_price_scale: 10.0
+
+  # ----- Bonds (no micro yet) -----
+  ZB:
+    name: 30-Year US Treasury Bond
+    underlying: long_bonds
+    multiplier: 1000.0          # $1000 per point
+    tick_size: 0.03125          # 1/32 of a point
+    tick_value: 31.25
+    initial_margin: 4000.0
+    commission_per_side: 2.50
+    proxy_data: data/raw/tlt_1d.csv  # rough proxy via TLT
+  ZN:
+    name: 10-Year US Treasury Note
+    underlying: 10y_treasury
+    multiplier: 1000.0
+    tick_size: 0.015625         # 1/64
+    tick_value: 15.625
+    initial_margin: 2200.0
+    commission_per_side: 2.50
+    proxy_data: data/raw/ief_1d.csv
