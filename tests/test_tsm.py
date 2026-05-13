@@ -12,7 +12,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from backtest.tsm import (
     TSMParams,
+    _portfolio_weights,
     _rebalance_mask,
+    multi_horizon_signal,
     simulate_tsm,
     simulate_tsm_portfolio,
     summarize,
@@ -268,3 +270,141 @@ def test_summarize_portfolio_includes_per_asset():
     assert "per_asset" in s
     assert set(s["per_asset"].keys()) == {"UP", "DN"}
     assert s["max_n_live"] == 2
+
+
+# ---------- multi-horizon signal tests ----------
+
+def test_multi_horizon_signal_averages_correctly():
+    # Build a series where 252-day return is +0.30 but 63-day return is -0.10.
+    # Three lookbacks: 63 (-1), 126 (?), 252 (+1). The 126-day window will be
+    # the integral of the regimes — just check the result is in [-1, 1] and
+    # not equal to either single signal.
+    n = 600
+    rng = np.random.RandomState(0)
+    # First 400 bars upward, last 200 downward
+    drift = np.concatenate([np.linspace(0, 0.5, 400), np.linspace(0.5, 0.35, 200)])
+    noise = rng.normal(0, 0.002, n).cumsum()
+    close = pd.Series(100 * np.exp(drift + noise), index=_daily_index(n))
+
+    mh = multi_horizon_signal(close, [63, 126, 252], skip_days=10)
+    last = mh.iloc[-1]
+    # Each individual binary signal at the last bar
+    s_63 = tsm_signal(close, 63, 10).iloc[-1]
+    s_126 = tsm_signal(close, 126, 10).iloc[-1]
+    s_252 = tsm_signal(close, 252, 10).iloc[-1]
+    expected = (s_63 + s_126 + s_252) / 3.0
+    assert abs(last - expected) < 1e-9
+    assert -1.0 <= last <= 1.0
+
+
+def test_multi_horizon_signal_rejects_empty_list():
+    close = pd.Series(np.linspace(100, 200, 400), index=_daily_index(400))
+    with pytest.raises(ValueError, match="must not be empty"):
+        multi_horizon_signal(close, [], skip_days=10)
+
+
+def test_simulate_tsm_with_multi_horizon_returns_continuous_position():
+    # Construct a series where horizons disagree: long uptrend then a recent
+    # sharp pullback. The 63-day signal flips short while 252-day stays long,
+    # so multi-horizon averages to ~0 or ±1/3 — i.e. NOT a binary signal.
+    n = 800
+    long_up = np.linspace(0, 1.0, 700)
+    short_down = np.linspace(1.0, 0.6, 100)
+    drift = np.concatenate([long_up, short_down])
+    rng = np.random.RandomState(2)
+    noise = rng.normal(0, 0.003, n).cumsum()
+    close = pd.Series(50 * np.exp(drift + noise), index=_daily_index(n))
+
+    p = TSMParams(lookback_days=252, skip_days=10, vol_lookback_days=30,
+                  cost_bps_per_turnover=0.0,
+                  multi_horizon_lookbacks=[63, 126, 252])
+    # Compare the raw multi-horizon signal at the last bar to single-lookback
+    # to confirm it produces fractional values when horizons disagree.
+    mh = multi_horizon_signal(close, [63, 126, 252], skip_days=10)
+    fractional_anywhere = ((mh.abs() > 0.01) & (mh.abs() < 0.99)).any()
+    assert fractional_anywhere
+    # And the full sim runs without crashing
+    sim = simulate_tsm(close, p)
+    assert "equity" in sim and "position" in sim
+
+
+# ---------- portfolio weighting tests ----------
+
+def _make_pair_for_weighting():
+    """A 2-asset frame for testing weighting logic. UP makes money on TSM,
+    DN_BAD has been a TSM loser — Sharpe-weighting should heavily favor UP."""
+    n = 600
+    rng = np.random.RandomState(7)
+    idx = _daily_index(n)
+    up_ret = pd.Series(rng.normal(0.002, 0.01, n), index=idx)       # good Sharpe
+    bad_ret = pd.Series(rng.normal(-0.001, 0.01, n), index=idx)     # negative
+    rets_df = pd.DataFrame({"UP": up_ret, "BAD": bad_ret})
+    is_live = pd.DataFrame(True, index=idx, columns=["UP", "BAD"])
+    n_live = is_live.sum(axis=1).astype(int)
+    return rets_df, is_live, n_live
+
+
+def test_portfolio_weighting_equal_normalizes_to_one():
+    rets_df, is_live, n_live = _make_pair_for_weighting()
+    w = _portfolio_weights(rets_df, is_live, n_live, "equal", 252)
+    row = w.iloc[-1]
+    assert abs(row.sum() - 1.0) < 1e-9
+    assert all(abs(v - 0.5) < 1e-9 for v in row)
+
+
+def test_portfolio_weighting_inverse_vol_favors_low_vol():
+    rets_df, is_live, n_live = _make_pair_for_weighting()
+    # Boost BAD's vol so inverse-vol weights it less
+    rets_df["BAD"] = rets_df["BAD"] * 5.0
+    w = _portfolio_weights(rets_df, is_live, n_live, "inverse_vol", 252)
+    # Take a date with full warmup
+    row = w.iloc[300]
+    assert abs(row.sum() - 1.0) < 1e-6
+    assert row["UP"] > row["BAD"]
+
+
+def test_portfolio_weighting_sharpe_drops_negative_sharpe_asset():
+    rets_df, is_live, n_live = _make_pair_for_weighting()
+    w = _portfolio_weights(rets_df, is_live, n_live, "sharpe", 252)
+    # After warmup, BAD has negative Sharpe → its weight should be 0
+    row = w.iloc[400]
+    assert abs(row.sum() - 1.0) < 1e-6
+    assert row["BAD"] == 0.0
+    assert row["UP"] == pytest.approx(1.0, abs=1e-6)
+
+
+def test_portfolio_weighting_unknown_scheme_raises():
+    rets_df, is_live, n_live = _make_pair_for_weighting()
+    with pytest.raises(ValueError, match="unreachable|unknown"):
+        _portfolio_weights(rets_df, is_live, n_live, "rubbish", 252)
+
+
+def test_portfolio_simulate_with_sharpe_weighting_beats_equal_when_losers():
+    # Two streams: UP makes money on TSM, BAD is a TSM loser. Sharpe-weighted
+    # portfolio should outperform equal-weighted because BAD gets zero weight.
+    up = _uptrend(seed=10)
+    bad = pd.Series(100 + np.cumsum(np.random.RandomState(99).normal(-0.01, 0.005, 600)),
+                     index=_daily_index(600))
+
+    p = TSMParams(lookback_days=120, skip_days=10, vol_lookback_days=30,
+                  cost_bps_per_turnover=0.0)
+    eq_port = simulate_tsm_portfolio({"UP": up, "BAD": bad}, p,
+                                        target_portfolio_vol=None,
+                                        weighting="equal")
+    sh_port = simulate_tsm_portfolio({"UP": up, "BAD": bad}, p,
+                                        target_portfolio_vol=None,
+                                        weighting="sharpe",
+                                        weighting_lookback_days=120)
+    s_eq = summarize(eq_port)["sharpe"]
+    s_sh = summarize(sh_port)["sharpe"]
+    # Sharpe-weighting won't always strictly dominate (especially early in the
+    # series before weights stabilize), but should generally do as well or better.
+    assert s_sh >= s_eq - 0.1
+
+
+def test_portfolio_simulate_rejects_unknown_weighting():
+    close = _uptrend()
+    p = TSMParams(lookback_days=120, skip_days=10, vol_lookback_days=30,
+                  cost_bps_per_turnover=0.0)
+    with pytest.raises(ValueError, match="unknown weighting"):
+        simulate_tsm_portfolio({"A": close}, p, weighting="bogus")

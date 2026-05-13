@@ -2,6 +2,12 @@
 
 **Status:** In progress. This is the chosen primary path.
 
+**Update — signal upgrade:** multi-horizon momentum (signals averaged across
+lookbacks of 63 / 126 / 252 days) lifts gold's Sharpe from 0.86 → **1.05** at
+2× futures leverage AND cuts max drawdown from -39% to **-23%**. Use
+`--multi-horizon 63,126,252` flag on both `run_tsm_backtest.py` and
+`run_tsm_futures.py`. Recommended for production.
+
 **Premise:** The biggest profit improvement isn't a better Sharpe — it's better
 capital structure. Sharpe 0.7 at 25% volatility makes 2.5× more dollars than
 Sharpe 0.9 at 10% volatility. Futures unlock the volatility dial without

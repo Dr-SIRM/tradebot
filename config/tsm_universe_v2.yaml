@@ -1,0 +1,40 @@
+# Improved TSM universe — multi-horizon momentum + Sharpe-weighted portfolio.
+#
+# Two changes vs config/tsm_universe.yaml:
+#   1. Signal is the average of TSM at lookbacks [63, 126, 252] (3m / 6m / 12m)
+#      rather than single 252-day. Defense against PBO-style lookback fragility.
+#   2. Portfolio weighting is "sharpe" (proportional to trailing realized
+#      Sharpe of each asset's TSM stream, negative-Sharpe → 0 weight) rather
+#      than equal-weight. Auto-drops persistent losers like ETH/HYG that
+#      drag down the equal-weight portfolio.
+
+start_date: '2018-01-01'
+end_date: '2026-05-11'
+
+tsm:
+  lookback_days: 252                # not used when multi_horizon_lookbacks is set,
+                                    # but kept as a fallback / display value
+  multi_horizon_lookbacks: [63, 126, 252]   # ← new
+  skip_days: 21
+  vol_lookback_days: 60
+  target_vol: 0.10
+  max_leverage: 2.0
+  cost_bps_per_turnover: 10.0
+  rebalance: monthly
+
+portfolio: true
+portfolio_vol_target: 0.10
+portfolio_weighting: sharpe          # ← new (equal | inverse_vol | sharpe)
+
+assets:
+  - { data: data/raw/btc_1d.csv,    symbol: BTC/USDT }
+  - { data: data/raw/eth_1d.csv,    symbol: ETH/USDT }
+  - { data: data/raw/qqq_1d.csv,    symbol: QQQ      }
+  - { data: data/raw/spy_1d.csv,    symbol: SPY      }
+  - { data: data/raw/gold_1d.csv,   symbol: XAU/USD  }
+  - { data: data/raw/eurusd_1d.csv, symbol: EUR/USD  }
+  - { data: data/raw/tlt_1d.csv,    symbol: TLT      }
+  - { data: data/raw/ief_1d.csv,    symbol: IEF      }
+  - { data: data/raw/hyg_1d.csv,    symbol: HYG      }
+  - { data: data/raw/efa_1d.csv,    symbol: EFA      }
+  - { data: data/raw/eem_1d.csv,    symbol: EEM      }

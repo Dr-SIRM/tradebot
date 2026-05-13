@@ -38,7 +38,13 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from backtest.tsm import TSMParams, _rebalance_mask, tsm_signal, vol_scaled_weight
+from backtest.tsm import (
+    TSMParams,
+    _rebalance_mask,
+    multi_horizon_signal,
+    tsm_signal,
+    vol_scaled_weight,
+)
 
 
 @dataclass
@@ -103,11 +109,21 @@ def simulate_tsm_futures(
         raise TypeError("close must have a DatetimeIndex")
     close = close.sort_index()
     n = len(close)
-    if n < params.lookback_days + params.skip_days + params.vol_lookback_days + 10:
-        raise ValueError(f"need >= {params.lookback_days + params.skip_days + params.vol_lookback_days + 10} bars; got {n}")
+    effective_lookback = (max(params.multi_horizon_lookbacks)
+                            if params.multi_horizon_lookbacks
+                            else params.lookback_days)
+    if n < effective_lookback + params.skip_days + params.vol_lookback_days + 10:
+        raise ValueError(
+            f"need >= {effective_lookback + params.skip_days + params.vol_lookback_days + 10} "
+            f"bars; got {n}"
+        )
 
     # ---- Same TSM signal & vol-scaled weight as the ETF simulator ----
-    signal = tsm_signal(close, params.lookback_days, params.skip_days)
+    if params.multi_horizon_lookbacks:
+        signal = multi_horizon_signal(close, params.multi_horizon_lookbacks,
+                                        params.skip_days)
+    else:
+        signal = tsm_signal(close, params.lookback_days, params.skip_days)
     # Effective vol target is the strategy's vol times the leverage factor.
     vol_target_effective = params.target_vol * leverage
     # max_leverage cap: the vol-scaling can't multiply position beyond this;
@@ -120,7 +136,7 @@ def simulate_tsm_futures(
     # Rebalance gating
     is_rebal = _rebalance_mask(close.index, params.rebalance)
     position_pct = raw_position_pct.where(is_rebal).ffill().fillna(0.0)
-    warmup = params.lookback_days + params.skip_days + params.vol_lookback_days
+    warmup = effective_lookback + params.skip_days + params.vol_lookback_days
     if warmup < len(position_pct):
         position_pct.iloc[:warmup] = 0.0
 

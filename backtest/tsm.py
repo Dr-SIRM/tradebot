@@ -38,6 +38,12 @@ class TSMParams:
     cost_bps_per_turnover: float = 10.0  # round-trip; applied to |Δposition|
     rebalance: str = "monthly"     # 'daily' | 'weekly' | 'monthly'
     initial_equity: float = 100_000.0
+    # Multi-horizon momentum: if set to a non-empty list, the signal is the
+    # average TSM sign across these lookbacks (instead of the single
+    # `lookback_days`). Defends against PBO-style lookback fragility and
+    # gives a continuous-magnitude signal. Common choice: [63, 126, 252]
+    # (3m / 6m / 12m). When None, falls back to single-horizon at lookback_days.
+    multi_horizon_lookbacks: list[int] | None = None
 
 
 def _rebalance_mask(index: pd.DatetimeIndex, freq: str) -> pd.Series:
@@ -67,6 +73,32 @@ def tsm_signal(close: pd.Series, lookback_days: int, skip_days: int) -> pd.Serie
     return sig
 
 
+def multi_horizon_signal(
+    close: pd.Series,
+    lookback_days_list: list[int],
+    skip_days: int,
+) -> pd.Series:
+    """Average TSM signal across multiple lookback horizons.
+
+    Equivalent to the Asness/Moskowitz multi-horizon momentum factor: at each
+    bar, compute the binary momentum signal at each lookback, then average. The
+    result is in [-1, +1] and acts as a *confidence* indicator — fully agreeing
+    across horizons gives ±1, mixed agreement gives a smaller magnitude.
+
+    Why this helps:
+      - Single-lookback TSM is fragile to which exact lookback you pick (the
+        PBO test showed lookback selection doesn't generalize).
+      - Averaging several plausible horizons (e.g., 3m / 6m / 12m) is the
+        textbook defense against this fragility.
+      - The continuous signal also gives natural position-size scaling: half
+        the horizons agreeing = half the position.
+    """
+    if not lookback_days_list:
+        raise ValueError("lookback_days_list must not be empty")
+    signals = [tsm_signal(close, lb, skip_days) for lb in lookback_days_list]
+    return sum(signals) / len(signals)
+
+
 def vol_scaled_weight(close: pd.Series, vol_lookback_days: int,
                        target_vol: float, max_leverage: float) -> pd.Series:
     """Scale factor so that signal × scale targets `target_vol` annualized."""
@@ -90,7 +122,11 @@ def simulate_tsm(close: pd.Series, params: TSMParams) -> dict:
         raise TypeError("close must have a DatetimeIndex")
     close = close.sort_index()
 
-    signal = tsm_signal(close, params.lookback_days, params.skip_days)
+    if params.multi_horizon_lookbacks:
+        signal = multi_horizon_signal(close, params.multi_horizon_lookbacks,
+                                        params.skip_days)
+    else:
+        signal = tsm_signal(close, params.lookback_days, params.skip_days)
     weight = vol_scaled_weight(close, params.vol_lookback_days,
                                 params.target_vol, params.max_leverage)
     raw_position = signal * weight
@@ -99,8 +135,12 @@ def simulate_tsm(close: pd.Series, params: TSMParams) -> dict:
     is_rebal = _rebalance_mask(close.index, params.rebalance)
     position = raw_position.where(is_rebal).ffill().fillna(0.0)
 
-    # Warmup: zero out positions until we have enough history for the signal
-    warmup = params.lookback_days + params.skip_days + params.vol_lookback_days
+    # Warmup: zero out positions until we have enough history for the signal.
+    # In multi-horizon mode the longest lookback drives the warmup.
+    effective_lookback = (max(params.multi_horizon_lookbacks)
+                            if params.multi_horizon_lookbacks
+                            else params.lookback_days)
+    warmup = effective_lookback + params.skip_days + params.vol_lookback_days
     if warmup < len(position):
         position.iloc[:warmup] = 0.0
 
@@ -176,42 +216,117 @@ def summarize(sim: dict, periods_per_year: int = 252) -> dict:
     }
 
 
+def _portfolio_weights(
+    rets_df: pd.DataFrame,
+    is_live: pd.DataFrame,
+    n_live: pd.Series,
+    weighting: str,
+    weighting_lookback_days: int,
+) -> pd.DataFrame:
+    """Per-asset portfolio weights at each date for a chosen weighting scheme.
+
+    Output: T × N DataFrame where weights sum to 1 across columns wherever
+    n_live > 0 (else all-zero row). Always shifted forward one day to be
+    causal w.r.t. the daily return that will be applied next.
+    """
+    n_live_safe = n_live.replace(0, np.nan)
+
+    if weighting == "equal":
+        weights = is_live.astype(float).div(n_live_safe, axis=0).fillna(0.0)
+        return weights  # equal-weight is naturally causal (no lookback used)
+
+    if weighting == "inverse_vol":
+        # Trailing realized vol of each asset's TSM return stream.
+        rv = rets_df.rolling(weighting_lookback_days,
+                               min_periods=weighting_lookback_days // 2).std()
+        # Invert; mask not-live and assets with no/zero vol.
+        inv = 1.0 / rv.where(rv > 0, np.nan)
+        inv = inv.where(is_live, 0.0).fillna(0.0)
+        # Normalize so rows sum to 1 where any asset has weight.
+        row_sum = inv.sum(axis=1).replace(0, np.nan)
+        weights = inv.div(row_sum, axis=0).fillna(0.0)
+        # Causal: weights at t are used for the return at t+1, but the weights
+        # themselves are computed on rolling windows ending at t, which
+        # technically uses today's return. Shift forward by one day so weight
+        # used at day t is computed only from data through t-1.
+        return weights.shift(1).fillna(0.0)
+
+    if weighting == "sharpe":
+        # Trailing Sharpe of each asset's TSM stream. Negative Sharpes get 0.
+        mu = rets_df.rolling(weighting_lookback_days,
+                              min_periods=weighting_lookback_days // 2).mean()
+        sd = rets_df.rolling(weighting_lookback_days,
+                              min_periods=weighting_lookback_days // 2).std()
+        sr = mu / sd.where(sd > 0, np.nan)
+        sr = sr.clip(lower=0.0)              # negative-Sharpe → 0 weight
+        sr = sr.where(is_live, 0.0).fillna(0.0)
+        row_sum = sr.sum(axis=1).replace(0, np.nan)
+        weights = sr.div(row_sum, axis=0).fillna(0.0)
+        # If row sum is zero (everyone is in drawdown), fall back to equal
+        # weight among live assets so we don't go fully flat — keeps the
+        # strategy engaged when conditions normalize.
+        equal_fallback = is_live.astype(float).div(n_live_safe, axis=0).fillna(0.0)
+        weights = weights.where(weights.sum(axis=1) > 0, equal_fallback)
+        return weights.shift(1).fillna(0.0)
+
+    raise ValueError(f"unreachable: unknown weighting {weighting!r}")
+
+
 def simulate_tsm_portfolio(
     prices: dict[str, pd.Series],
     params: TSMParams,
     target_portfolio_vol: float | None = 0.10,
     vol_lookback_days: int = 60,
+    weighting: str = "equal",
+    weighting_lookback_days: int = 252,
 ) -> dict:
-    """Equal-weight portfolio of per-asset TSM streams.
+    """Multi-asset TSM portfolio with selectable weighting scheme.
 
     Each asset runs through simulate_tsm() independently. At each date, the
-    portfolio holds an equal weight in every 'live' asset (signal active, past
-    warmup). When N_live varies (assets coming online at different dates,
-    or going flat during weak-signal periods) the equal-weight allocation
-    rebalances automatically.
+    portfolio combines the live assets according to `weighting`:
 
-    Per-asset streams are already vol-targeted, so the equal-weight portfolio
-    has volatility roughly target_per_asset_vol / sqrt(N_live) when assets are
-    uncorrelated. To hit a stable portfolio vol target across varying N, an
-    optional rolling realized-vol rescale is applied on top (causal: vol
-    estimated from past returns only, shifted forward one day).
+      - "equal"        — same weight per live asset (the original behavior).
+      - "inverse_vol"  — weight ∝ 1 / trailing-realized-vol of TSM return
+                          stream. More stable streams get more allocation.
+                          Since per-asset returns are already vol-targeted to
+                          params.target_vol, this is approximately equal but
+                          favors assets whose realized vol matches its target.
+      - "sharpe"       — weight ∝ max(trailing realized Sharpe, 0). Negative-
+                          Sharpe assets get zero allocation. Auto-drops losers
+                          like ETH or HYG that drag down equal-weight portfolios.
+
+    Weight estimates use a *trailing* window (`weighting_lookback_days`) and
+    are shifted forward one day so they're causal — at each rebalance the
+    weight is based only on observations strictly before the rebalance day.
+
+    When `target_portfolio_vol` is set (default 10%), an additional rolling
+    realized-vol rescale brings the combined return to that target. This is
+    also causal and capped by params.max_leverage.
 
     Args:
         prices: {symbol: close-price Series}, each with a DatetimeIndex.
         params: TSMParams used for every per-asset simulation.
-        target_portfolio_vol: If set, rescale the daily portfolio return so
-            its rolling realized vol matches this target. Pass None to skip.
-        vol_lookback_days: Window for realized-vol estimate (if rescaling).
+        target_portfolio_vol: Portfolio-level vol target after combining streams.
+            None disables the rescale.
+        vol_lookback_days: Window for the *portfolio-level* realized-vol rescale.
+        weighting: "equal" | "inverse_vol" | "sharpe" — see above.
+        weighting_lookback_days: Trailing window for inverse_vol / sharpe weight
+            estimates. Defaults to 252 (~12 months) so the weighting is stable
+            and doesn't whip around with short-term performance.
 
     Returns dict with:
-        equity, daily_returns: portfolio-level series (DatetimeIndex)
-        per_asset_sims: {symbol: simulate_tsm result} for each input asset
+        equity, daily_returns: portfolio-level series
+        per_asset_sims: {symbol: simulate_tsm result}
         n_live: int Series — number of live assets at each date
         portfolio_weights: DataFrame symbol×date of weights actually applied
         scale: pd.Series of the vol-target rescale factor (1.0 if disabled)
+        weighting: the scheme used (for the record)
     """
     if not prices:
         raise ValueError("prices is empty")
+    if weighting not in {"equal", "inverse_vol", "sharpe"}:
+        raise ValueError(f"unknown weighting {weighting!r}; "
+                          f"use 'equal' | 'inverse_vol' | 'sharpe'")
 
     per_asset = {sym: simulate_tsm(close.sort_index(), params)
                  for sym, close in prices.items()}
@@ -226,8 +341,8 @@ def simulate_tsm_portfolio(
     is_live = (pos_df.fillna(0.0) != 0.0)
     n_live = is_live.sum(axis=1).astype(int)
 
-    # Equal weight across live assets. weights[t,sym] = 1/N_live(t) if live else 0.
-    weights = is_live.astype(float).div(n_live.replace(0, np.nan), axis=0).fillna(0.0)
+    weights = _portfolio_weights(rets_df, is_live, n_live,
+                                   weighting, weighting_lookback_days)
 
     # Per-asset return when not live should be 0 (no exposure)
     rets_masked = rets_df.where(is_live, 0.0).fillna(0.0)
@@ -255,6 +370,7 @@ def simulate_tsm_portfolio(
         "n_live": n_live,
         "portfolio_weights": weights,
         "per_asset_sims": per_asset,
+        "weighting": weighting,
     }
 
 

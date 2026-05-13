@@ -181,6 +181,9 @@ def main() -> int:
     p.add_argument("--vol-lookback", type=int, default=60)
     p.add_argument("--rebalance", default="monthly",
                     choices=["daily", "weekly", "monthly"])
+    p.add_argument("--multi-horizon",
+                    help="Comma-separated lookback list (e.g. '63,126,252'). "
+                         "When set, signal = avg of TSM signals at each lookback")
     p.add_argument("--contracts-file", default="config/futures_contracts.yaml")
     p.add_argument("--out", default="logs/tsm_futures")
     args = p.parse_args()
@@ -211,6 +214,8 @@ def main() -> int:
         print("no data after filtering", file=sys.stderr)
         return 1
 
+    mh = ([int(x) for x in args.multi_horizon.split(",")]
+            if args.multi_horizon else None)
     params = TSMParams(
         lookback_days=args.lookback,
         skip_days=args.skip,
@@ -219,6 +224,7 @@ def main() -> int:
         max_leverage=args.max_leverage,
         cost_bps_per_turnover=0.0,  # not used in futures sim
         rebalance=args.rebalance,
+        multi_horizon_lookbacks=mh,
     )
 
     label = args.symbol_label or args.contract
@@ -227,7 +233,10 @@ def main() -> int:
           f"multiplier=${contract.multiplier:.0f}/pt "
           f"margin=${contract.initial_margin:,.0f}/contract")
     print(f"Data:     {df.index[0].date()} → {df.index[-1].date()}  ({len(df)} daily bars)")
-    print(f"Params:   target_vol={params.target_vol:.0%}, lookback={params.lookback_days}d, "
+    sig_desc = (f"multi-horizon {params.multi_horizon_lookbacks}"
+                  if params.multi_horizon_lookbacks
+                  else f"single lookback={params.lookback_days}d")
+    print(f"Params:   target_vol={params.target_vol:.0%}, signal={sig_desc}, "
           f"skip={params.skip_days}d, rebalance={params.rebalance}")
 
     sweep = run_leverage_sweep(close, contract, params, leverages, args.equity)

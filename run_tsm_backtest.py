@@ -152,7 +152,8 @@ def evaluate_tsm(spec: AssetSpec, params: TSMParams,
 
 def evaluate_portfolio(specs: list[AssetSpec], params: TSMParams,
                         start_date: Optional[str], end_date: Optional[str],
-                        target_portfolio_vol: float | None) -> dict:
+                        target_portfolio_vol: float | None,
+                        weighting: str = "equal") -> dict:
     """Build closes dict, run the combined-portfolio simulation, and return a
     row with the same shape as evaluate_tsm()."""
     row: dict = {"symbol": "PORTFOLIO", "data": "(combined)"}
@@ -182,7 +183,8 @@ def evaluate_portfolio(specs: list[AssetSpec], params: TSMParams,
             return row
 
         port = simulate_tsm_portfolio(closes, params,
-                                       target_portfolio_vol=target_portfolio_vol)
+                                       target_portfolio_vol=target_portfolio_vol,
+                                       weighting=weighting)
         summary = summarize(port)
         row.update({
             "bars": int(len(port["daily_returns"])),
@@ -288,6 +290,12 @@ def main() -> int:
                    help="Also evaluate the equal-weight portfolio of all assets")
     p.add_argument("--portfolio-vol-target", type=float, default=0.10,
                    help="Portfolio realized-vol target for the rescale (0 disables)")
+    p.add_argument("--portfolio-weighting", default="equal",
+                   choices=["equal", "inverse_vol", "sharpe"],
+                   help="How to weight assets in the portfolio")
+    p.add_argument("--multi-horizon",
+                   help="Comma-separated lookback list (e.g. '63,126,252'). "
+                        "When set, signal = avg of TSM signals at each lookback")
     p.add_argument("--out", default="logs/tsm_sweep")
     args = p.parse_args()
 
@@ -296,6 +304,8 @@ def main() -> int:
     specs: list[AssetSpec] = []
     start = args.start_date
     end = args.end_date
+    mh = ([int(x) for x in args.multi_horizon.split(",")]
+            if args.multi_horizon else None)
     params = TSMParams(
         lookback_days=args.lookback,
         skip_days=args.skip,
@@ -304,10 +314,12 @@ def main() -> int:
         max_leverage=args.max_leverage,
         cost_bps_per_turnover=args.cost_bps,
         rebalance=args.rebalance,
+        multi_horizon_lookbacks=mh,
     )
 
     portfolio_flag = args.portfolio
     portfolio_vol_target = args.portfolio_vol_target if args.portfolio_vol_target > 0 else None
+    portfolio_weighting = args.portfolio_weighting
 
     if args.spec:
         with open(args.spec) as f:
@@ -319,6 +331,8 @@ def main() -> int:
         if "portfolio_vol_target" in doc:
             v = doc["portfolio_vol_target"]
             portfolio_vol_target = float(v) if v and v > 0 else None
+        if "portfolio_weighting" in doc:
+            portfolio_weighting = doc["portfolio_weighting"]
         tsm_overrides = doc.get("tsm", {}) or {}
         params = TSMParams(
             lookback_days=tsm_overrides.get("lookback_days", params.lookback_days),
@@ -328,6 +342,8 @@ def main() -> int:
             max_leverage=tsm_overrides.get("max_leverage", params.max_leverage),
             cost_bps_per_turnover=tsm_overrides.get("cost_bps_per_turnover", params.cost_bps_per_turnover),
             rebalance=tsm_overrides.get("rebalance", params.rebalance),
+            multi_horizon_lookbacks=tsm_overrides.get("multi_horizon_lookbacks",
+                                                       params.multi_horizon_lookbacks),
         )
         for a in doc.get("assets", []):
             specs.append(AssetSpec(data=a["data"], symbol=a["symbol"]))
@@ -341,10 +357,17 @@ def main() -> int:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\nTSM params: lookback={params.lookback_days} skip={params.skip_days} "
+    sig_desc = (f"multi-horizon {params.multi_horizon_lookbacks}"
+                  if params.multi_horizon_lookbacks
+                  else f"single lookback={params.lookback_days}")
+    print(f"\nTSM params: {sig_desc} skip={params.skip_days} "
           f"vol_lb={params.vol_lookback_days} target_vol={params.target_vol:.0%} "
           f"max_lev={params.max_leverage} costs={params.cost_bps_per_turnover}bps "
-          f"rebal={params.rebalance}\n")
+          f"rebal={params.rebalance}")
+    if portfolio_flag:
+        print(f"Portfolio: weighting={portfolio_weighting} "
+              f"target_vol={portfolio_vol_target}")
+    print()
 
     rows: list[dict] = []
     for i, spec in enumerate(specs, 1):
@@ -355,8 +378,11 @@ def main() -> int:
 
     if portfolio_flag and len(specs) >= 2:
         print(f"\n[PORTFOLIO] combining {len(specs)} assets "
-              f"(target vol={portfolio_vol_target}) ...")
-        port_row = evaluate_portfolio(specs, params, start, end, portfolio_vol_target)
+              f"(weighting={portfolio_weighting}, "
+              f"target vol={portfolio_vol_target}) ...")
+        port_row = evaluate_portfolio(specs, params, start, end,
+                                        portfolio_vol_target,
+                                        weighting=portfolio_weighting)
         rows.append(port_row)
         pd.DataFrame(rows).to_csv(out_dir / "tsm_sweep.csv", index=False)
 
