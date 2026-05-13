@@ -27,6 +27,18 @@ if [[ "${1:-}" == "--force" ]]; then FORCE=1; fi
 cd "$(dirname "$0")/.."
 mkdir -p data/raw
 
+# Prefer project venv (has deps from requirements.txt); else system python3/python.
+if [[ -x ".venv/bin/python" ]]; then
+  PYTHON=".venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+  PYTHON=python3
+elif command -v python >/dev/null 2>&1; then
+  PYTHON=python
+else
+  echo "error: create .venv (see README) or install python3 on PATH" >&2
+  exit 1
+fi
+
 START="2010-01-01"
 END="2026-05-11"
 
@@ -61,7 +73,7 @@ for entry in "${ASSETS[@]}"; do
     continue
   fi
   echo "[fetch]  $ticker → $outfile"
-  python -m data.download equity "$ticker" 1d "$START" "$END" -o "$outpath" || {
+  "$PYTHON" -m data.download equity "$ticker" 1d "$START" "$END" -o "$outpath" || {
     echo "[FAIL]   $ticker — moving on"
     continue
   }
@@ -70,4 +82,4 @@ done
 
 echo
 echo "Done. Downloaded: $n_done, skipped: $n_skipped"
-echo "Now run:  python run_tsm_backtest.py --spec config/tsm_universe.yaml --out logs/tsm_universe"
+echo "Now run:  $PYTHON run_tsm_backtest.py --spec config/tsm_universe.yaml --out logs/tsm_universe"
