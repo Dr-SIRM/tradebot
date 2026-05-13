@@ -101,6 +101,7 @@ def run_leverage_sweep(close: pd.Series, contract: FuturesContract,
             "max_margin_pct": s["max_margin_pct"],
             "margin_breaches": s["margin_breaches"],
             "commissions": s["commissions_paid"],
+            "derisk_days": res.derisk_active_days,
         })
     return pd.DataFrame(rows)
 
@@ -184,6 +185,13 @@ def main() -> int:
     p.add_argument("--multi-horizon",
                     help="Comma-separated lookback list (e.g. '63,126,252'). "
                          "When set, signal = avg of TSM signals at each lookback")
+    p.add_argument("--derisk-dd-threshold", type=float, default=0.0,
+                    help="Halve positions when running DD exceeds this "
+                         "(0 = off, typical 0.10-0.15)")
+    p.add_argument("--derisk-scale", type=float, default=0.5,
+                    help="Multiply positions by this factor while derisked")
+    p.add_argument("--derisk-recovery", type=float, default=0.05,
+                    help="Restore full size when DD recovers under this level")
     p.add_argument("--contracts-file", default="config/futures_contracts.yaml")
     p.add_argument("--out", default="logs/tsm_futures")
     args = p.parse_args()
@@ -225,6 +233,9 @@ def main() -> int:
         cost_bps_per_turnover=0.0,  # not used in futures sim
         rebalance=args.rebalance,
         multi_horizon_lookbacks=mh,
+        derisk_dd_threshold=args.derisk_dd_threshold,
+        derisk_scale=args.derisk_scale,
+        derisk_recovery_threshold=args.derisk_recovery,
     )
 
     label = args.symbol_label or args.contract
@@ -238,6 +249,10 @@ def main() -> int:
                   else f"single lookback={params.lookback_days}d")
     print(f"Params:   target_vol={params.target_vol:.0%}, signal={sig_desc}, "
           f"skip={params.skip_days}d, rebalance={params.rebalance}")
+    if params.derisk_dd_threshold > 0:
+        print(f"DD-derisk: threshold={params.derisk_dd_threshold:.0%}, "
+              f"scale={params.derisk_scale}, "
+              f"recovery={params.derisk_recovery_threshold:.0%}")
 
     sweep = run_leverage_sweep(close, contract, params, leverages, args.equity)
     sweep.to_csv(out_dir / f"{args.contract}_leverage_sweep.csv", index=False)

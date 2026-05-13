@@ -76,6 +76,8 @@ class FuturesSimResult:
     raw_position_pct: pd.Series       # signal × vol_target × leverage (before rounding)
     contract: FuturesContract
     leverage: float
+    derisk_flag: pd.Series | None = None  # bool series of derisked days (None when off)
+    derisk_active_days: int = 0
 
 
 def simulate_tsm_futures(
@@ -156,6 +158,12 @@ def simulate_tsm_futures(
     margin_breaches = 0
     wipeout_idx: int | None = None
 
+    # Drawdown-based de-risking state.
+    derisk_enabled = params.derisk_dd_threshold > 0
+    derisk_flag_arr = np.zeros(n, dtype=bool)
+    peak_equity = initial_equity
+    is_derisked = False
+
     for i in range(n):
         # Determine target contracts at start of bar i based on prior equity
         # and the position fraction decided at the most recent rebalance.
@@ -168,7 +176,21 @@ def simulate_tsm_futures(
             daily_rets[i] = 0.0
             continue
 
-        target_dollars = pos_pct[i] * prev_eq         # signed $ exposure
+        # DD-derisk: state transitions happen based on prev_eq (info available
+        # at the start of bar i). flag[i] records the factor APPLIED to bar i.
+        if derisk_enabled:
+            if prev_eq > peak_equity:
+                peak_equity = prev_eq
+            dd_now = (prev_eq - peak_equity) / peak_equity if peak_equity > 0 else 0.0
+            # Transition first (using state of prior bar), then record flag.
+            if not is_derisked and dd_now <= -params.derisk_dd_threshold:
+                is_derisked = True
+            elif is_derisked and dd_now >= -params.derisk_recovery_threshold:
+                is_derisked = False
+        derisk_flag_arr[i] = is_derisked
+        derisk_factor = params.derisk_scale if is_derisked else 1.0
+
+        target_dollars = pos_pct[i] * prev_eq * derisk_factor   # signed $ exposure
         contract_notional = contract.multiplier * futures_prices[i]
         if contract_notional <= 0:
             n_contracts = 0
@@ -215,6 +237,8 @@ def simulate_tsm_futures(
         margin_pct = pd.Series(np.where(equity > 0, margin_used / equity, np.inf),
                                 index=close.index)
 
+    derisk_series = (pd.Series(derisk_flag_arr, index=close.index)
+                      if derisk_enabled else None)
     return FuturesSimResult(
         equity=eq_series,
         daily_returns=ret_series,
@@ -228,6 +252,8 @@ def simulate_tsm_futures(
         raw_position_pct=position_pct,
         contract=contract,
         leverage=leverage,
+        derisk_flag=derisk_series,
+        derisk_active_days=int(derisk_flag_arr.sum()) if derisk_enabled else 0,
     )
 
 

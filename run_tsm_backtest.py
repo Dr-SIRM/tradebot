@@ -296,6 +296,13 @@ def main() -> int:
     p.add_argument("--multi-horizon",
                    help="Comma-separated lookback list (e.g. '63,126,252'). "
                         "When set, signal = avg of TSM signals at each lookback")
+    p.add_argument("--derisk-dd-threshold", type=float, default=0.0,
+                   help="Halve positions when running DD exceeds this (0 = off, "
+                        "typical 0.10-0.15)")
+    p.add_argument("--derisk-scale", type=float, default=0.5,
+                   help="Multiply positions by this factor while derisked")
+    p.add_argument("--derisk-recovery", type=float, default=0.05,
+                   help="Restore full size when DD recovers under this level")
     p.add_argument("--out", default="logs/tsm_sweep")
     args = p.parse_args()
 
@@ -315,6 +322,9 @@ def main() -> int:
         cost_bps_per_turnover=args.cost_bps,
         rebalance=args.rebalance,
         multi_horizon_lookbacks=mh,
+        derisk_dd_threshold=args.derisk_dd_threshold,
+        derisk_scale=args.derisk_scale,
+        derisk_recovery_threshold=args.derisk_recovery,
     )
 
     portfolio_flag = args.portfolio
@@ -344,6 +354,11 @@ def main() -> int:
             rebalance=tsm_overrides.get("rebalance", params.rebalance),
             multi_horizon_lookbacks=tsm_overrides.get("multi_horizon_lookbacks",
                                                        params.multi_horizon_lookbacks),
+            derisk_dd_threshold=tsm_overrides.get("derisk_dd_threshold",
+                                                    params.derisk_dd_threshold),
+            derisk_scale=tsm_overrides.get("derisk_scale", params.derisk_scale),
+            derisk_recovery_threshold=tsm_overrides.get(
+                "derisk_recovery_threshold", params.derisk_recovery_threshold),
         )
         for a in doc.get("assets", []):
             specs.append(AssetSpec(data=a["data"], symbol=a["symbol"]))
@@ -364,6 +379,10 @@ def main() -> int:
           f"vol_lb={params.vol_lookback_days} target_vol={params.target_vol:.0%} "
           f"max_lev={params.max_leverage} costs={params.cost_bps_per_turnover}bps "
           f"rebal={params.rebalance}")
+    if params.derisk_dd_threshold > 0:
+        print(f"DD-derisk: threshold={params.derisk_dd_threshold:.0%}, "
+              f"scale={params.derisk_scale}, "
+              f"recovery={params.derisk_recovery_threshold:.0%}")
     if portfolio_flag:
         print(f"Portfolio: weighting={portfolio_weighting} "
               f"target_vol={portfolio_vol_target}")

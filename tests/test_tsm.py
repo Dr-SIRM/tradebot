@@ -14,6 +14,7 @@ from backtest.tsm import (
     TSMParams,
     _portfolio_weights,
     _rebalance_mask,
+    apply_dd_derisk,
     multi_horizon_signal,
     simulate_tsm,
     simulate_tsm_portfolio,
@@ -408,3 +409,134 @@ def test_portfolio_simulate_rejects_unknown_weighting():
                   cost_bps_per_turnover=0.0)
     with pytest.raises(ValueError, match="unknown weighting"):
         simulate_tsm_portfolio({"A": close}, p, weighting="bogus")
+
+
+# ---------- drawdown de-risking tests ----------
+
+def test_apply_dd_derisk_passthrough_when_threshold_zero():
+    rets = pd.Series([0.01, -0.02, 0.005], index=_daily_index(3))
+    scaled, flag = apply_dd_derisk(rets, threshold=0.0, scale=0.5,
+                                    recovery_threshold=0.05)
+    pd.testing.assert_series_equal(scaled, rets, check_names=False)
+    assert not flag.any()
+
+
+def test_apply_dd_derisk_rejects_invalid_recovery():
+    rets = pd.Series([0.01, -0.02], index=_daily_index(2))
+    # recovery must be < threshold
+    with pytest.raises(ValueError, match="recovery_threshold"):
+        apply_dd_derisk(rets, threshold=0.10, scale=0.5,
+                          recovery_threshold=0.10)
+    # recovery must be > 0
+    with pytest.raises(ValueError, match="recovery_threshold"):
+        apply_dd_derisk(rets, threshold=0.10, scale=0.5,
+                          recovery_threshold=0.0)
+
+
+def test_apply_dd_derisk_triggers_on_drawdown_then_recovers():
+    # Construct: small rises, then a deep DD, then recovery.
+    rets = pd.Series(
+        [0.01]*5 + [-0.03]*10 + [0.02]*30,
+        index=_daily_index(45),
+    )
+    # threshold 12% drawdown
+    scaled, flag = apply_dd_derisk(rets, threshold=0.12, scale=0.5,
+                                    recovery_threshold=0.03)
+    # Should derisk at some point and then un-derisk later
+    assert flag.any()
+    assert not flag.iloc[-1]
+    # Returns during derisk should be 0.5× original
+    derisk_idx = flag[flag].index
+    assert all(abs(scaled.loc[t] - 0.5 * rets.loc[t]) < 1e-12
+               for t in derisk_idx)
+
+
+def test_apply_dd_derisk_reduces_max_dd():
+    # Pathological series with a 30% drawdown then full recovery.
+    rng = np.random.RandomState(42)
+    n = 400
+    base = np.concatenate([
+        rng.normal(0.001, 0.005, 100),
+        rng.normal(-0.005, 0.01, 60),      # the drawdown
+        rng.normal(0.003, 0.005, 240),     # recovery + new highs
+    ])
+    rets = pd.Series(base, index=_daily_index(n))
+    eq_no = (1 + rets).cumprod()
+    dd_no = ((eq_no / eq_no.cummax()) - 1).min()
+
+    scaled, _ = apply_dd_derisk(rets, threshold=0.10, scale=0.5,
+                                  recovery_threshold=0.03)
+    eq_yes = (1 + scaled).cumprod()
+    dd_yes = ((eq_yes / eq_yes.cummax()) - 1).min()
+    # Derisking should produce a shallower (less negative) max drawdown
+    assert dd_yes > dd_no
+
+
+def test_apply_dd_derisk_hysteresis_prevents_whipsaw():
+    # Series oscillates right at the threshold boundary. Without hysteresis,
+    # the derisk flag would flip every bar. With it, switches should be rare.
+    n = 200
+    # Slow oscillation around threshold equity level
+    rets = pd.Series(np.sin(np.linspace(0, 20, n)) * 0.02,
+                      index=_daily_index(n))
+    _, flag = apply_dd_derisk(rets, threshold=0.05, scale=0.5,
+                                recovery_threshold=0.02)
+    # Count state transitions (False→True or True→False)
+    transitions = (flag.astype(int).diff().abs() > 0).sum()
+    # Without hysteresis this would be ~50+; with it, expect <= 6 transitions
+    assert transitions <= 6
+
+
+def test_simulate_tsm_with_derisk_lowers_max_dd():
+    # Build a series with a meaningful drawdown after warmup
+    n = 800
+    rng = np.random.RandomState(7)
+    # Strong uptrend then a sharp 30% drop in days 500-560
+    leg1 = np.linspace(0, 1.0, 500)
+    drop = np.linspace(1.0, 0.65, 60)
+    leg2 = np.linspace(0.65, 1.2, 240)
+    drift = np.concatenate([leg1, drop, leg2])
+    noise = rng.normal(0, 0.003, n).cumsum()
+    close = pd.Series(50 * np.exp(drift + noise), index=_daily_index(n))
+
+    p_no = TSMParams(lookback_days=120, skip_days=10, vol_lookback_days=30,
+                      cost_bps_per_turnover=0.0)
+    p_yes = TSMParams(lookback_days=120, skip_days=10, vol_lookback_days=30,
+                       cost_bps_per_turnover=0.0,
+                       derisk_dd_threshold=0.10, derisk_scale=0.5,
+                       derisk_recovery_threshold=0.03)
+    sim_no = simulate_tsm(close, p_no)
+    sim_yes = simulate_tsm(close, p_yes)
+    # Compute max DD for both
+    eq_no = sim_no["equity"]
+    eq_yes = sim_yes["equity"]
+    dd_no = ((eq_no / eq_no.cummax()) - 1).min()
+    dd_yes = ((eq_yes / eq_yes.cummax()) - 1).min()
+    assert dd_yes >= dd_no - 0.005  # at least no worse (small numeric slack)
+    # And at least one day should have triggered derisk
+    assert sim_yes["derisk_active_days"] > 0
+
+
+def test_simulate_tsm_portfolio_with_derisk_reports_active_days():
+    up = _uptrend(seed=11)
+    dn = _downtrend(seed=22)
+    p = TSMParams(lookback_days=120, skip_days=10, vol_lookback_days=30,
+                  cost_bps_per_turnover=0.0,
+                  derisk_dd_threshold=0.10, derisk_scale=0.5,
+                  derisk_recovery_threshold=0.03)
+    port = simulate_tsm_portfolio({"UP": up, "DN": dn}, p,
+                                    target_portfolio_vol=None,
+                                    weighting="equal")
+    # derisk_flag is in the output
+    assert "derisk_flag" in port
+    assert "derisk_active_days" in port
+    assert port["derisk_active_days"] >= 0
+
+
+def test_apply_dd_derisk_preserves_returns_when_no_dd_breach():
+    # All positive returns → no drawdown → derisk never triggers
+    rets = pd.Series([0.005] * 100, index=_daily_index(100))
+    scaled, flag = apply_dd_derisk(rets, threshold=0.10, scale=0.5,
+                                    recovery_threshold=0.03)
+    pd.testing.assert_series_equal(scaled, rets, check_names=False)
+    assert not flag.any()

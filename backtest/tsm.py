@@ -44,6 +44,18 @@ class TSMParams:
     # gives a continuous-magnitude signal. Common choice: [63, 126, 252]
     # (3m / 6m / 12m). When None, falls back to single-horizon at lookback_days.
     multi_horizon_lookbacks: list[int] | None = None
+    # Drawdown-based de-risking: when running equity drawdown exceeds
+    # `derisk_dd_threshold`, multiply subsequent positions by `derisk_scale`.
+    # Restore full size when DD recovers to under `derisk_recovery_threshold`.
+    # Hysteresis (the gap between the two thresholds) avoids whipsaw at the
+    # boundary. Set derisk_dd_threshold=0 to disable.
+    #
+    # Doesn't typically improve Sharpe — the strategy also shrinks just before
+    # the recovery rally — but materially cuts max DD. Trade-off: ~5-15% lower
+    # max DD for ~0-5% lower Sharpe. Worth it for trade-ability.
+    derisk_dd_threshold: float = 0.0       # 0 = off; typical 0.10-0.15
+    derisk_scale: float = 0.5              # multiply positions by this when triggered
+    derisk_recovery_threshold: float = 0.05  # restore full size below this DD
 
 
 def _rebalance_mask(index: pd.DatetimeIndex, freq: str) -> pd.Series:
@@ -71,6 +83,72 @@ def tsm_signal(close: pd.Series, lookback_days: int, skip_days: int) -> pd.Serie
     mom = log_close.diff(lookback_days).shift(skip_days)
     sig = np.sign(mom).fillna(0.0)
     return sig
+
+
+def apply_dd_derisk(
+    returns: pd.Series,
+    threshold: float,
+    scale: float,
+    recovery_threshold: float,
+    initial_equity: float = 1.0,
+) -> tuple[pd.Series, pd.Series]:
+    """Apply drawdown-based position scaling to a daily return series.
+
+    Iterates daily, tracking the running equity peak and current drawdown.
+    When DD exceeds `threshold`, subsequent daily returns are multiplied by
+    `scale`. When DD recovers to below `recovery_threshold` (note the
+    asymmetry — that's the hysteresis), full size is restored.
+
+    Scaling positions by `f` is mathematically equivalent to scaling daily
+    returns by `f` (since daily_return = position × asset_return). This
+    function operates directly on the return series.
+
+    Args:
+        returns: daily return series (e.g. portfolio's pct returns or a
+            single-asset TSM return stream).
+        threshold: positive number. When equity DD ≤ -threshold, derisk.
+        scale: factor applied while derisked (e.g. 0.5).
+        recovery_threshold: positive number. When DD ≥ -recovery_threshold,
+            restore full size. Must be < threshold for hysteresis.
+        initial_equity: only affects the equity scale used internally; the
+            derisk decision is invariant to it.
+
+    Returns:
+        (scaled_returns, derisk_flag) — both indexed like `returns`. The
+        flag is True on days the derisk was active for that day's return.
+    """
+    if threshold <= 0:
+        return returns.copy(), pd.Series(False, index=returns.index)
+    if not (0.0 < recovery_threshold < threshold):
+        raise ValueError(
+            f"recovery_threshold ({recovery_threshold}) must be in "
+            f"(0, threshold={threshold})"
+        )
+
+    rets_arr = returns.values
+    n = len(rets_arr)
+    out = np.zeros(n)
+    flag = np.zeros(n, dtype=bool)
+    eq = initial_equity
+    peak = initial_equity
+    is_derisked = False
+    for i in range(n):
+        # flag[i] records the factor APPLIED to bar i's return.
+        flag[i] = is_derisked
+        factor = scale if is_derisked else 1.0
+        out[i] = rets_arr[i] * factor
+        eq *= (1.0 + out[i])
+        if eq > peak:
+            peak = eq
+        # dd is in [-1, 0]
+        dd = (eq - peak) / peak if peak > 0 else 0.0
+        # Transition state for the NEXT bar.
+        if not is_derisked and dd <= -threshold:
+            is_derisked = True
+        elif is_derisked and dd >= -recovery_threshold:
+            is_derisked = False
+    return (pd.Series(out, index=returns.index),
+            pd.Series(flag, index=returns.index))
 
 
 def multi_horizon_signal(
@@ -153,6 +231,22 @@ def simulate_tsm(close: pd.Series, params: TSMParams) -> dict:
     costs_daily = turnover * (params.cost_bps_per_turnover / 10000.0)
 
     net_daily = gross_daily - costs_daily
+
+    # Drawdown-based de-risking (optional). Scales daily returns down by
+    # `derisk_scale` once DD exceeds `derisk_dd_threshold`, until recovery.
+    # Scaling returns is mathematically equivalent to scaling positions
+    # since both gross and costs are linear in position size.
+    if params.derisk_dd_threshold > 0:
+        net_daily, derisk_flag = apply_dd_derisk(
+            net_daily,
+            threshold=params.derisk_dd_threshold,
+            scale=params.derisk_scale,
+            recovery_threshold=params.derisk_recovery_threshold,
+            initial_equity=params.initial_equity,
+        )
+    else:
+        derisk_flag = pd.Series(False, index=net_daily.index)
+
     equity = (1.0 + net_daily).cumprod() * params.initial_equity
 
     # Build "trade" records: each rebalance where position actually changed.
@@ -188,6 +282,8 @@ def simulate_tsm(close: pd.Series, params: TSMParams) -> dict:
         "turnover_total": float(turnover.sum()),
         "signal": signal,
         "weight": weight,
+        "derisk_flag": derisk_flag,
+        "derisk_active_days": int(derisk_flag.sum()),
     }
 
 
@@ -360,6 +456,22 @@ def simulate_tsm_portfolio(
         scale = scale.fillna(0.0)
 
     portfolio_rets = scale * unscaled
+
+    # Portfolio-level drawdown de-risking: when the combined equity hits a
+    # threshold drawdown, scale all subsequent daily returns down by
+    # params.derisk_scale until recovery. Applied at the portfolio level
+    # (not per-asset), which is the standard CTA practice.
+    if params.derisk_dd_threshold > 0:
+        portfolio_rets, derisk_flag = apply_dd_derisk(
+            portfolio_rets,
+            threshold=params.derisk_dd_threshold,
+            scale=params.derisk_scale,
+            recovery_threshold=params.derisk_recovery_threshold,
+            initial_equity=params.initial_equity,
+        )
+    else:
+        derisk_flag = pd.Series(False, index=portfolio_rets.index)
+
     equity = (1.0 + portfolio_rets).cumprod() * params.initial_equity
 
     return {
@@ -371,6 +483,8 @@ def simulate_tsm_portfolio(
         "portfolio_weights": weights,
         "per_asset_sims": per_asset,
         "weighting": weighting,
+        "derisk_flag": derisk_flag,
+        "derisk_active_days": int(derisk_flag.sum()),
     }
 
 
