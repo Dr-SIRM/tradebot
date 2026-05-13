@@ -188,21 +188,29 @@ def _print_verdict(stability: dict) -> None:
     pbo = stability.get("pbo", float("nan"))
     frac_pos = stability.get("frac_positive_sharpe", 0.0)
     med_sharpe = stability.get("sharpe_p50", 0.0)
+    worst_sharpe = stability.get("worst_sharpe", float("nan"))
 
-    if (not np.isnan(dsr) and dsr >= 0.90 and not np.isnan(pbo) and pbo < 0.10
-            and frac_pos >= 0.80 and med_sharpe > 0.3):
+    # ROBUST: a real edge as a *class* — almost every parameter setting works.
+    # High PBO here just means parameter selection is noisy; use the literature
+    # defaults rather than optimizing.
+    if frac_pos >= 0.95 and (not np.isnan(dsr) and dsr >= 0.90) and med_sharpe > 0.4:
         v = "ROBUST"
-        notes = "Best Sharpe survives multiple-comparisons deflation, " \
-                "PBO is healthy, and a clear majority of grid configs are positive."
-    elif (not np.isnan(dsr) and dsr >= 0.80 and not np.isnan(pbo) and pbo < 0.30
-            and frac_pos >= 0.60):
+        notes = (f"All (or nearly all) parameter configs are profitable; DSR "
+                 f"survives deflation. The strategy class works. "
+                 f"PBO={pbo:.2f} → don't try to optimize parameters; use the "
+                 f"literature defaults and expect ~median Sharpe ({med_sharpe:.2f}) "
+                 f"going forward, not the best-IS Sharpe ({stability['best_sharpe']:.2f}).")
+    # BORDERLINE: edge exists but spread is wider; some configs lose
+    elif frac_pos >= 0.70 and (not np.isnan(dsr) and dsr >= 0.80):
         v = "BORDERLINE"
-        notes = "Result holds under deflation but stability is moderate; " \
-                "PBO suggests some sensitivity to parameter choice."
-    elif (not np.isnan(pbo) and pbo > 0.50) or frac_pos < 0.40:
+        notes = (f"Most configs are profitable but {(1-frac_pos)*100:.0f}% lose money "
+                 f"(worst Sharpe {worst_sharpe:.2f}). Edge is real but parameter "
+                 f"choice matters more — don't deploy without longer OOS validation.")
+    # OVERFIT: best is high but median is near zero — selection bias dominates
+    elif (not np.isnan(pbo) and pbo > 0.50 and med_sharpe < 0.2 and frac_pos < 0.70):
         v = "OVERFIT"
-        notes = "Best Sharpe is likely an artifact of multiple comparisons; " \
-                "most parameter choices don't reproduce the win."
+        notes = ("Best Sharpe is likely an artifact of multiple comparisons; "
+                 "most parameter choices don't reproduce the win.")
     else:
         v = "WEAK"
         notes = "Some edge survives but not enough to deploy."
