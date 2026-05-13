@@ -76,6 +76,9 @@ def evaluate_tsm(spec: AssetSpec, params: TSMParams,
     """Run TSM on one asset and return a summary row."""
     row: dict = {"symbol": spec.symbol, "data": spec.data}
     try:
+        if not Path(spec.data).exists():
+            row["error"] = "missing data file"
+            return row
         df = load_historical(spec.data)
         if df.empty:
             row["error"] = "empty data file"
@@ -155,7 +158,11 @@ def evaluate_portfolio(specs: list[AssetSpec], params: TSMParams,
     row: dict = {"symbol": "PORTFOLIO", "data": "(combined)"}
     try:
         closes: dict[str, pd.Series] = {}
+        skipped_missing: list[str] = []
         for spec in specs:
+            if not Path(spec.data).exists():
+                skipped_missing.append(spec.symbol)
+                continue
             df = load_historical(spec.data)
             if df.empty:
                 continue
@@ -167,6 +174,9 @@ def evaluate_portfolio(specs: list[AssetSpec], params: TSMParams,
             if len(df) < params.lookback_days + params.skip_days + params.vol_lookback_days + 30:
                 continue
             closes[spec.symbol] = df["close"].astype(float)
+        if skipped_missing:
+            log.info("[PORTFOLIO] skipped %d missing CSVs: %s",
+                      len(skipped_missing), ", ".join(skipped_missing))
         if not closes:
             row["error"] = "no eligible assets after filtering"
             return row
@@ -218,10 +228,11 @@ def evaluate_portfolio(specs: list[AssetSpec], params: TSMParams,
 
 
 def _verdict(row: dict) -> str:
-    if "error" in row:
+    err = row.get("error")
+    if isinstance(err, str) and err:
         return "ERROR"
     sharpe = row.get("sharpe")
-    if sharpe is None:
+    if sharpe is None or (isinstance(sharpe, float) and pd.isna(sharpe)):
         return "NO_DATA"
     dsr = row.get("dsr", 0.0)
     if sharpe >= 0.7 and dsr >= 0.85:

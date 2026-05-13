@@ -1,0 +1,60 @@
+# Expanded TSM universe — 14 daily assets spanning uncorrelated macro factors.
+#
+# Goal: maximize diversification on the portfolio combiner. Going from 6 to 14
+# assets, the theoretical Sharpe lift (assuming independent bets) is sqrt(14/6)
+# ≈ 1.5x. Realized correlation between asset classes means actual gain is
+# probably 1.2-1.3x — still substantial.
+#
+# Bonds (TLT/IEF) and HYG are particularly valuable: they're driven by rates
+# and credit spreads, almost orthogonal to the equity/commodity factors we
+# already have. They also have strong historical TSM edge in their own right
+# (Hurst/Ooi/Pedersen find Sharpe ~0.8 on bonds 1880-2013).
+#
+# Prerequisite: run `bash scripts/download_universe.sh` first to populate
+# the 8 missing CSVs (TLT, IEF, HYG, EFA, EEM, VEA, SLV, USO, DBA, VNQ).
+#
+# Window 2018-01-01 gives every asset (including newer ETFs like HYG launched
+# 2007 and EEM launched 2003) plenty of warmup history.
+
+start_date: '2018-01-01'
+end_date: '2026-05-11'
+
+tsm:
+  lookback_days: 252
+  skip_days: 21
+  vol_lookback_days: 60
+  target_vol: 0.10
+  max_leverage: 2.0
+  cost_bps_per_turnover: 10.0
+  rebalance: monthly
+
+portfolio: true
+portfolio_vol_target: 0.10
+
+assets:
+  # ----- already downloaded -----
+  - { data: data/raw/btc_1d.csv,    symbol: BTC/USDT }
+  - { data: data/raw/eth_1d.csv,    symbol: ETH/USDT }
+  - { data: data/raw/qqq_1d.csv,    symbol: QQQ      }
+  - { data: data/raw/spy_1d.csv,    symbol: SPY      }
+  - { data: data/raw/gold_1d.csv,   symbol: XAU/USD  }
+  - { data: data/raw/eurusd_1d.csv, symbol: EUR/USD  }
+
+  # ----- to be downloaded by scripts/download_universe.sh -----
+  # Bonds — different macro factor (rates + credit)
+  - { data: data/raw/tlt_1d.csv, symbol: TLT }   # 20+ year treasuries
+  - { data: data/raw/ief_1d.csv, symbol: IEF }   # 7-10 year treasuries
+  - { data: data/raw/hyg_1d.csv, symbol: HYG }   # high yield credit
+
+  # International equity — different geography
+  - { data: data/raw/efa_1d.csv, symbol: EFA }   # developed ex-US
+  - { data: data/raw/eem_1d.csv, symbol: EEM }   # emerging markets
+  - { data: data/raw/vea_1d.csv, symbol: VEA }   # developed ex-US (lower fees)
+
+  # Commodities — different from gold
+  - { data: data/raw/slv_1d.csv, symbol: SLV }   # silver
+  - { data: data/raw/uso_1d.csv, symbol: USO }   # crude oil (WTI)
+  - { data: data/raw/dba_1d.csv, symbol: DBA }   # agriculture basket
+
+  # Real estate — separate sub-asset class
+  - { data: data/raw/vnq_1d.csv, symbol: VNQ }   # US REITs
