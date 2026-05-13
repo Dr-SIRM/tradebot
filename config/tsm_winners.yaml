@@ -1,0 +1,28 @@
+# TSM sweep — winners-only portfolio.
+# Builds the equal-weight portfolio from just the three assets that showed
+# positive DSR in the full sweep (gold PROMISING, QQQ INVESTIGATE, BTC WEAK).
+# Tests whether dropping the negative-edge components (ETH, EUR/USD) and the
+# short-window noisy ones (SPY) improves the portfolio.
+
+start_date: '2018-01-01'
+end_date: '2026-05-11'
+
+tsm:
+  lookback_days: 252
+  skip_days: 21
+  vol_lookback_days: 60
+  target_vol: 0.10
+  max_leverage: 2.0
+  cost_bps_per_turnover: 10.0
+  rebalance: monthly
+
+portfolio: true
+portfolio_vol_target: 0.10
+
+assets:
+  - data: data/raw/gold_1d.csv
+    symbol: XAU/USD
+  - data: data/raw/qqq_1d.csv
+    symbol: QQQ
+  - data: data/raw/btc_1d.csv
+    symbol: BTC/USDT

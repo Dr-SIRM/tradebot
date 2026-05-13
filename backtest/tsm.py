@@ -171,6 +171,102 @@ def summarize(sim: dict, periods_per_year: int = 252) -> dict:
         "annualized_vol": float(sigma),
         "total_return": total_return,
         "max_dd": float(dd),
-        "n_trades": len(sim["trades"]),
-        "turnover_total": sim["turnover_total"],
+        "n_trades": len(sim.get("trades", [])),
+        "turnover_total": float(sim.get("turnover_total", 0.0)),
     }
+
+
+def simulate_tsm_portfolio(
+    prices: dict[str, pd.Series],
+    params: TSMParams,
+    target_portfolio_vol: float | None = 0.10,
+    vol_lookback_days: int = 60,
+) -> dict:
+    """Equal-weight portfolio of per-asset TSM streams.
+
+    Each asset runs through simulate_tsm() independently. At each date, the
+    portfolio holds an equal weight in every 'live' asset (signal active, past
+    warmup). When N_live varies (assets coming online at different dates,
+    or going flat during weak-signal periods) the equal-weight allocation
+    rebalances automatically.
+
+    Per-asset streams are already vol-targeted, so the equal-weight portfolio
+    has volatility roughly target_per_asset_vol / sqrt(N_live) when assets are
+    uncorrelated. To hit a stable portfolio vol target across varying N, an
+    optional rolling realized-vol rescale is applied on top (causal: vol
+    estimated from past returns only, shifted forward one day).
+
+    Args:
+        prices: {symbol: close-price Series}, each with a DatetimeIndex.
+        params: TSMParams used for every per-asset simulation.
+        target_portfolio_vol: If set, rescale the daily portfolio return so
+            its rolling realized vol matches this target. Pass None to skip.
+        vol_lookback_days: Window for realized-vol estimate (if rescaling).
+
+    Returns dict with:
+        equity, daily_returns: portfolio-level series (DatetimeIndex)
+        per_asset_sims: {symbol: simulate_tsm result} for each input asset
+        n_live: int Series — number of live assets at each date
+        portfolio_weights: DataFrame symbol×date of weights actually applied
+        scale: pd.Series of the vol-target rescale factor (1.0 if disabled)
+    """
+    if not prices:
+        raise ValueError("prices is empty")
+
+    per_asset = {sym: simulate_tsm(close.sort_index(), params)
+                 for sym, close in prices.items()}
+
+    rets_df = pd.DataFrame({sym: per_asset[sym]["daily_returns"]
+                             for sym in per_asset}).sort_index()
+    pos_df = pd.DataFrame({sym: per_asset[sym]["position"]
+                            for sym in per_asset}).reindex(rets_df.index)
+
+    # 'Live' = strategy is actually holding (non-zero position). NaN from
+    # asset-not-yet-in-data also counts as not-live.
+    is_live = (pos_df.fillna(0.0) != 0.0)
+    n_live = is_live.sum(axis=1).astype(int)
+
+    # Equal weight across live assets. weights[t,sym] = 1/N_live(t) if live else 0.
+    weights = is_live.astype(float).div(n_live.replace(0, np.nan), axis=0).fillna(0.0)
+
+    # Per-asset return when not live should be 0 (no exposure)
+    rets_masked = rets_df.where(is_live, 0.0).fillna(0.0)
+    unscaled = (rets_masked * weights).sum(axis=1)
+
+    # Optional realized-vol rescaling to hit a fixed portfolio target.
+    # Causal: vol estimated from returns up to t-1 used to size for day t.
+    if target_portfolio_vol is None:
+        scale = pd.Series(1.0, index=unscaled.index)
+    else:
+        realized_vol = unscaled.rolling(vol_lookback_days,
+                                          min_periods=vol_lookback_days // 2) \
+                                .std().shift(1) * np.sqrt(252)
+        scale = (target_portfolio_vol / realized_vol).clip(upper=params.max_leverage)
+        scale = scale.fillna(0.0)
+
+    portfolio_rets = scale * unscaled
+    equity = (1.0 + portfolio_rets).cumprod() * params.initial_equity
+
+    return {
+        "equity": equity,
+        "daily_returns": portfolio_rets,
+        "unscaled_returns": unscaled,
+        "scale": scale,
+        "n_live": n_live,
+        "portfolio_weights": weights,
+        "per_asset_sims": per_asset,
+    }
+
+
+def summarize_portfolio(sim: dict, periods_per_year: int = 252) -> dict:
+    """Headline stats for a simulate_tsm_portfolio result, including the
+    per-asset Sharpes so the user can see what's pulling the portfolio
+    around."""
+    base = summarize(sim, periods_per_year=periods_per_year)
+    per_asset = {}
+    for sym, asset_sim in sim["per_asset_sims"].items():
+        per_asset[sym] = summarize(asset_sim, periods_per_year=periods_per_year)
+    base["per_asset"] = per_asset
+    base["avg_n_live"] = float(sim["n_live"].mean()) if len(sim["n_live"]) else 0.0
+    base["max_n_live"] = int(sim["n_live"].max()) if len(sim["n_live"]) else 0
+    return base

@@ -35,7 +35,12 @@ import yaml
 
 from backtest.montecarlo import run_monte_carlo
 from backtest.robustness import deflated_sharpe_ratio
-from backtest.tsm import TSMParams, simulate_tsm, summarize
+from backtest.tsm import (
+    TSMParams,
+    simulate_tsm,
+    simulate_tsm_portfolio,
+    summarize,
+)
 from data.feed import load_historical
 from utils.logging import get_logger, setup_logging
 from utils.types import Side, Trade
@@ -142,6 +147,76 @@ def evaluate_tsm(spec: AssetSpec, params: TSMParams,
     return row
 
 
+def evaluate_portfolio(specs: list[AssetSpec], params: TSMParams,
+                        start_date: Optional[str], end_date: Optional[str],
+                        target_portfolio_vol: float | None) -> dict:
+    """Build closes dict, run the combined-portfolio simulation, and return a
+    row with the same shape as evaluate_tsm()."""
+    row: dict = {"symbol": "PORTFOLIO", "data": "(combined)"}
+    try:
+        closes: dict[str, pd.Series] = {}
+        for spec in specs:
+            df = load_historical(spec.data)
+            if df.empty:
+                continue
+            df = _to_daily(df)
+            if start_date:
+                df = df[df.index >= pd.Timestamp(start_date, tz="UTC")]
+            if end_date:
+                df = df[df.index <= pd.Timestamp(end_date, tz="UTC")]
+            if len(df) < params.lookback_days + params.skip_days + params.vol_lookback_days + 30:
+                continue
+            closes[spec.symbol] = df["close"].astype(float)
+        if not closes:
+            row["error"] = "no eligible assets after filtering"
+            return row
+
+        port = simulate_tsm_portfolio(closes, params,
+                                       target_portfolio_vol=target_portfolio_vol)
+        summary = summarize(port)
+        row.update({
+            "bars": int(len(port["daily_returns"])),
+            "n_assets": len(closes),
+            "avg_n_live": float(port["n_live"].mean()),
+            "sharpe": summary["sharpe"],
+            "annualized_return": summary["annualized_return"],
+            "annualized_vol": summary["annualized_vol"],
+            "total_return": summary["total_return"],
+            "max_dd": summary["max_dd"],
+        })
+
+        rets = port["daily_returns"]
+        rets_for_dsr = rets[rets != 0]
+        if len(rets_for_dsr) >= 30:
+            dsr = deflated_sharpe_ratio(rets_for_dsr, n_trials=1, periods_per_year=252)
+            row["dsr"] = dsr.deflated_sharpe
+
+        # MC bootstrap on monthly portfolio returns
+        monthly = port["daily_returns"].resample("ME") \
+            .apply(lambda s: (1 + s).prod() - 1).dropna()
+        if len(monthly) >= 10:
+            mc_trades = []
+            for ts, r in monthly.items():
+                pnl = params.initial_equity * float(r)
+                mc_trades.append(Trade(
+                    symbol="PORTFOLIO", asset_class="multi",
+                    side=Side.LONG, strategy="tsm-portfolio",
+                    entry_time=ts.to_pydatetime(), exit_time=ts.to_pydatetime(),
+                    entry_price=0.0, exit_price=0.0, quantity=1.0,
+                    pnl=pnl, pnl_pct=float(r), r_multiple=0.0,
+                    exit_reason="rebalance",
+                ))
+            mc = run_monte_carlo(mc_trades, starting_equity=params.initial_equity,
+                                  n_runs=1000, seed=42)
+            row["mc_p_profitable"] = mc.prob_profitable
+            row["mc_p_ruin"] = mc.prob_ruin
+
+    except Exception as e:
+        log.error("[PORTFOLIO] eval failed: %s\n%s", e, traceback.format_exc())
+        row["error"] = str(e)
+    return row
+
+
 def _verdict(row: dict) -> str:
     if "error" in row:
         return "ERROR"
@@ -198,6 +273,10 @@ def main() -> int:
     p.add_argument("--max-leverage", type=float, default=2.0)
     p.add_argument("--cost-bps", type=float, default=10.0)
     p.add_argument("--rebalance", default="monthly", choices=["daily", "weekly", "monthly"])
+    p.add_argument("--portfolio", action="store_true",
+                   help="Also evaluate the equal-weight portfolio of all assets")
+    p.add_argument("--portfolio-vol-target", type=float, default=0.10,
+                   help="Portfolio realized-vol target for the rescale (0 disables)")
     p.add_argument("--out", default="logs/tsm_sweep")
     args = p.parse_args()
 
@@ -216,11 +295,19 @@ def main() -> int:
         rebalance=args.rebalance,
     )
 
+    portfolio_flag = args.portfolio
+    portfolio_vol_target = args.portfolio_vol_target if args.portfolio_vol_target > 0 else None
+
     if args.spec:
         with open(args.spec) as f:
             doc = yaml.safe_load(f)
         start = start or doc.get("start_date")
         end = end or doc.get("end_date")
+        if "portfolio" in doc:
+            portfolio_flag = bool(doc["portfolio"])
+        if "portfolio_vol_target" in doc:
+            v = doc["portfolio_vol_target"]
+            portfolio_vol_target = float(v) if v and v > 0 else None
         tsm_overrides = doc.get("tsm", {}) or {}
         params = TSMParams(
             lookback_days=tsm_overrides.get("lookback_days", params.lookback_days),
@@ -253,6 +340,13 @@ def main() -> int:
         print(f"[{i}/{len(specs)}] {spec.symbol} ...")
         row = evaluate_tsm(spec, params, start, end)
         rows.append(row)
+        pd.DataFrame(rows).to_csv(out_dir / "tsm_sweep.csv", index=False)
+
+    if portfolio_flag and len(specs) >= 2:
+        print(f"\n[PORTFOLIO] combining {len(specs)} assets "
+              f"(target vol={portfolio_vol_target}) ...")
+        port_row = evaluate_portfolio(specs, params, start, end, portfolio_vol_target)
+        rows.append(port_row)
         pd.DataFrame(rows).to_csv(out_dir / "tsm_sweep.csv", index=False)
 
     print("\n=== Time-series momentum results (sorted by verdict) ===")

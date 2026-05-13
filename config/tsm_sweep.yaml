@@ -21,6 +21,12 @@ tsm:
   cost_bps_per_turnover: 10.0
   rebalance: monthly
 
+# Combine all per-asset signals into one equal-weight portfolio with realized-vol
+# targeting. Diversification across uncorrelated TSM streams typically pushes
+# the combined Sharpe materially above the average per-asset Sharpe.
+portfolio: true
+portfolio_vol_target: 0.10
+
 assets:
   - data: data/raw/btc_1d.csv
     symbol: BTC/USDT

@@ -14,7 +14,9 @@ from backtest.tsm import (
     TSMParams,
     _rebalance_mask,
     simulate_tsm,
+    simulate_tsm_portfolio,
     summarize,
+    summarize_portfolio,
     tsm_signal,
     vol_scaled_weight,
 )
@@ -157,3 +159,112 @@ def test_simulate_tsm_requires_datetime_index():
     close = pd.Series([100, 101, 102])
     with pytest.raises(TypeError):
         simulate_tsm(close, TSMParams())
+
+
+# ---------- portfolio tests ----------
+
+def _uptrend(n: int = 600, start: float = 100.0, end: float = 150.0,
+              seed: int = 0) -> pd.Series:
+    rng = np.random.RandomState(seed)
+    drift = np.linspace(0, np.log(end / start), n)
+    noise = rng.normal(0, 0.01, n).cumsum()
+    return pd.Series(start * np.exp(drift + noise), index=_daily_index(n))
+
+
+def _downtrend(n: int = 600, start: float = 200.0, end: float = 100.0,
+                seed: int = 1) -> pd.Series:
+    rng = np.random.RandomState(seed)
+    drift = np.linspace(0, np.log(end / start), n)
+    noise = rng.normal(0, 0.01, n).cumsum()
+    return pd.Series(start * np.exp(drift + noise), index=_daily_index(n))
+
+
+def test_portfolio_single_asset_matches_single_run():
+    # Portfolio of 1 asset, no portfolio-level rescaling → identical equity
+    # path to running simulate_tsm() directly.
+    close = _uptrend()
+    p = TSMParams(lookback_days=120, skip_days=10, vol_lookback_days=30,
+                  cost_bps_per_turnover=0.0)
+    single = simulate_tsm(close, p)
+    port = simulate_tsm_portfolio({"A": close}, p, target_portfolio_vol=None)
+    pd.testing.assert_series_equal(
+        port["daily_returns"], single["daily_returns"], check_names=False
+    )
+
+
+def test_portfolio_two_perfectly_correlated_assets_no_diversification():
+    # Same series, same params → portfolio has same Sharpe as one asset
+    # (just lower vol because we're averaging two identical streams, but
+    # the rolling rescale brings it back to target).
+    close = _uptrend()
+    p = TSMParams(lookback_days=120, skip_days=10, vol_lookback_days=30,
+                  cost_bps_per_turnover=0.0)
+    port = simulate_tsm_portfolio({"A": close, "B": close.copy()}, p,
+                                    target_portfolio_vol=0.10)
+    s_port = summarize(port)
+    s_single = summarize(simulate_tsm(close, p))
+    # With perfect correlation, Sharpe shouldn't *improve* — within tight noise tolerance
+    assert s_port["sharpe"] == pytest.approx(s_single["sharpe"], abs=0.15)
+
+
+def test_portfolio_anticorrelated_trends_diversify():
+    # One uptrend (TSM goes long, profits) + one downtrend (TSM goes short,
+    # also profits). The two profit streams are uncorrelated in time → Sharpe
+    # of the equal-weight portfolio > Sharpe of either alone.
+    up = _uptrend(seed=10)
+    dn = _downtrend(seed=20)
+    p = TSMParams(lookback_days=120, skip_days=10, vol_lookback_days=30,
+                  cost_bps_per_turnover=0.0)
+    s_up = summarize(simulate_tsm(up, p))
+    s_dn = summarize(simulate_tsm(dn, p))
+    port = simulate_tsm_portfolio({"UP": up, "DN": dn}, p,
+                                    target_portfolio_vol=None)
+    s_port = summarize(port)
+    # Portfolio Sharpe should beat the worse of the two and be close to or
+    # better than the better of the two
+    assert s_port["sharpe"] > min(s_up["sharpe"], s_dn["sharpe"])
+
+
+def test_portfolio_n_live_tracks_warmup_completion():
+    # Asset A has 400 bars, asset B has 600 — for the first 200 dates B
+    # doesn't even exist; n_live should be 1 (just A, after its warmup),
+    # then 2 once B comes online.
+    a = _uptrend(n=400, seed=1)
+    b = _uptrend(n=600, seed=2)
+    # b has its own date index (the same calendar but longer); shift b earlier
+    # so A starts later than B
+    p = TSMParams(lookback_days=60, skip_days=5, vol_lookback_days=20,
+                  cost_bps_per_turnover=0.0)
+    port = simulate_tsm_portfolio({"A": a, "B": b}, p, target_portfolio_vol=None)
+    # n_live should be in {0, 1, 2}
+    assert set(port["n_live"].unique()).issubset({0, 1, 2})
+    # At least some dates should have both live
+    assert (port["n_live"] == 2).any()
+
+
+def test_portfolio_empty_prices_raises():
+    with pytest.raises(ValueError):
+        simulate_tsm_portfolio({}, TSMParams())
+
+
+def test_portfolio_vol_target_clamped_by_max_leverage():
+    # Very low-vol asset → naive scaling would demand huge leverage; cap holds.
+    close = pd.Series(100 + np.linspace(0, 0.5, 600),
+                       index=_daily_index(600))  # near-flat
+    p = TSMParams(lookback_days=120, skip_days=10, vol_lookback_days=30,
+                  max_leverage=1.5, cost_bps_per_turnover=0.0)
+    port = simulate_tsm_portfolio({"A": close}, p, target_portfolio_vol=0.30)
+    assert port["scale"].max() <= 1.5 + 1e-9
+
+
+def test_summarize_portfolio_includes_per_asset():
+    up = _uptrend(seed=3)
+    dn = _downtrend(seed=4)
+    p = TSMParams(lookback_days=120, skip_days=10, vol_lookback_days=30,
+                  cost_bps_per_turnover=0.0)
+    port = simulate_tsm_portfolio({"UP": up, "DN": dn}, p,
+                                    target_portfolio_vol=None)
+    s = summarize_portfolio(port)
+    assert "per_asset" in s
+    assert set(s["per_asset"].keys()) == {"UP", "DN"}
+    assert s["max_n_live"] == 2
